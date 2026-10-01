@@ -6,7 +6,8 @@
  * by If-Match on the ETag we saw).  Writes land in the page cache; dirty
  * folios are pinned (there is no page-by-page writeback to an object store)
  * and the whole object is PUT on flush/fsync/last close.  Shared writable
- * mmaps are refused since their dirtying could not be tracked.
+ * mmaps dirty folios through ->page_mkwrite; uploads write-protect each
+ * folio before sending it, so later stores fault again and are kept.
  */
 #include <linux/kernel.h>
 #include <linux/slab.h>
@@ -15,6 +16,7 @@
 #include <linux/highmem.h>
 #include <linux/uio.h>
 #include <linux/writeback.h>
+#include <linux/rmap.h>
 #if __has_include(<linux/folio_batch.h>)	/* pagevec.h went away in 7.3 */
 #include <linux/folio_batch.h>
 #else
@@ -520,6 +522,25 @@ struct put_body {
 	loff_t start, end;
 };
 
+/*
+ * Shared writable mmaps: before a folio is sent, write-protect its
+ * mappings and clear PG_checked.  ->page_mkwrite sets PG_checked (and
+ * PG_dirty) on the next store, so a folio still unchecked after the send
+ * holds exactly what was stored and may be cleaned.
+ */
+static void protect_folio(struct address_space *mapping, struct folio *folio)
+{
+	if (!folio_mapped(folio) && !folio_test_checked(folio))
+		return;
+	folio_lock(folio);
+	if (folio->mapping == mapping) {
+		if (folio_mkclean(folio))
+			folio_mark_dirty(folio);
+		folio_clear_checked(folio);
+	}
+	folio_unlock(folio);
+}
+
 /* Send [start, end) of the file from the page cache. */
 static int send_file_body(struct ks3fs_conn *conn, void *arg)
 {
@@ -537,6 +558,7 @@ static int send_file_body(struct ks3fs_conn *conn, void *arg)
 		folio = read_mapping_folio(mapping, pos >> PAGE_SHIFT, NULL);
 		if (IS_ERR(folio))
 			return PTR_ERR(folio);
+		protect_folio(mapping, folio);
 		off = offset_in_folio(folio, pos);
 		n = min_t(loff_t, folio_size(folio) - off, pb->end - pos);
 		while (n && !err) {
@@ -558,14 +580,20 @@ static int send_file_body(struct ks3fs_conn *conn, void *arg)
 	return 0;
 }
 
-/* Mark the (now stored) folios in [start, end) clean and reclaimable. */
-static void clean_folios(struct address_space *mapping, loff_t start,
+/*
+ * Mark the (now stored) folios in [start, end) clean and reclaimable,
+ * except those stored to through an mmap since they were sent (or that
+ * were never sent since: an uploaded part written through an mmap).
+ * Returns whether any was kept dirty.
+ */
+static bool clean_folios(struct address_space *mapping, loff_t start,
 			 loff_t end)
 {
 	pgoff_t idx, last;
+	bool kept = false;
 
 	if (end <= start)
-		return;
+		return false;
 	last = (end - 1) >> PAGE_SHIFT;
 	for (idx = start >> PAGE_SHIFT; idx <= last; idx++) {
 		struct folio *folio = filemap_get_folio(mapping, idx);
@@ -573,13 +601,18 @@ static void clean_folios(struct address_space *mapping, loff_t start,
 		if (IS_ERR_OR_NULL(folio))
 			continue;
 		folio_lock(folio);
-		if (folio->mapping == mapping)
-			folio_clear_dirty(folio);
+		if (folio->mapping == mapping) {
+			if (folio_test_checked(folio))
+				kept = true;
+			else
+				folio_clear_dirty(folio);
+		}
 		folio_unlock(folio);
 		idx = folio->index + folio_nr_pages(folio) - 1;
 		folio_put(folio);
 		cond_resched();
 	}
+	return kept;
 }
 
 /* Does [start, end) hold data written since the object was stored? */
@@ -896,7 +929,9 @@ int ks3fs_upload_locked(struct inode *inode)
 	ki->attr_time = jiffies;
 	set_bit(KS3_I_REMOTE, &ki->flags);
 	clear_bit(KS3_I_DIRTY, &ki->flags);
-	clean_folios(inode->i_mapping, 0, size);
+	/* stores through an mmap that missed this upload go with the next */
+	if (clean_folios(inode->i_mapping, 0, size))
+		set_bit(KS3_I_DIRTY, &ki->flags);
 	/* metadata changed while a multipart upload was open */
 	if (test_bit(KS3_I_META_DIRTY, &ki->flags))
 		ks3fs_push_meta(inode);
@@ -1026,14 +1061,43 @@ static int ks3fs_fsync(struct file *file, loff_t start, loff_t end,
 	return ks3fs_upload(file_inode(file));
 }
 
+/*
+ * First store to a folio through a shared mapping (and the first after
+ * each upload write-protected it): the file needs uploading again.
+ */
+static vm_fault_t ks3fs_page_mkwrite(struct vm_fault *vmf)
+{
+	struct inode *inode = file_inode(vmf->vma->vm_file);
+	struct folio *folio = page_folio(vmf->page);
+	vm_fault_t ret = VM_FAULT_LOCKED;
+
+	sb_start_pagefault(inode->i_sb);
+	file_update_time(vmf->vma->vm_file);
+	folio_lock(folio);
+	if (folio->mapping != inode->i_mapping) {	/* truncated */
+		folio_unlock(folio);
+		ret = VM_FAULT_NOPAGE;
+		goto out;
+	}
+	folio_mark_dirty(folio);
+	folio_set_checked(folio);
+	set_bit(KS3_I_DIRTY, &KS3_I(inode)->flags);
+out:
+	sb_end_pagefault(inode->i_sb);
+	return ret;
+}
+
+static const struct vm_operations_struct ks3fs_vm_ops = {
+	.fault		= filemap_fault,
+	.map_pages	= filemap_map_pages,
+	.page_mkwrite	= ks3fs_page_mkwrite,
+};
+
 static int ks3fs_mmap(struct file *file, struct vm_area_struct *vma)
 {
-	if (vma->vm_flags & VM_SHARED) {
-		if (vma->vm_flags & VM_WRITE)
-			return -EOPNOTSUPP;
-		vm_flags_clear(vma, VM_MAYWRITE);
-	}
-	return generic_file_mmap(file, vma);
+	file_accessed(file);
+	vma->vm_ops = &ks3fs_vm_ops;
+	return 0;
 }
 
 static ssize_t ks3fs_write_iter(struct kiocb *iocb, struct iov_iter *from)

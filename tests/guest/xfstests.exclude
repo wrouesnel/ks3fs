@@ -1,11 +1,5 @@
 # xfstests that cannot pass on ks3fs because of documented limitations.
 # Everything else in the quick group must pass or be skipped (_notrun).
 
-# shared writable mmap is refused (EOPNOTSUPP): no per-page writeback to
-# an object store
-generic/346	# holetest: MAP_SHARED writes
-generic/437	# t_mmap_cow_race: MAP_SHARED writes
-generic/638	# t_mmap_writev_overlap: MAP_SHARED writes
-
 # no special files (mknod is EPERM)
 generic/696	# vfstest setgid-create-umask: mknodat

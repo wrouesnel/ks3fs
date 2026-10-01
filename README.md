@@ -182,8 +182,9 @@ options:
 - A reader using mmap on a file that another process is streaming out can get
   `EIO` for parts uploaded in between. `read()` and `splice()` complete the
   upload first instead.
-- Shared writable `mmap` is refused (`EOPNOTSUPP`); read-only and private
-  mmaps work.
+- Shared writable `mmap` works, but like other writes the data is stored on
+  `msync`/`fsync`, close, or unmap of the last reference; mapped pages written
+  to stay in memory until then.
 - No hard links, special files or xattrs. Metadata changes reach other clients
   after writeback (about 5 s to 30 s) or `sync`.
 - `O_DIRECT` is not supported.

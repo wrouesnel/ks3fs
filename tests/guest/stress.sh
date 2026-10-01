@@ -12,12 +12,12 @@ check "second mount" mount -t ks3fs -o $OPTS,ttl=0 $S3_BUCKET $M2
 check "part_size=5 mount" mount -t ks3fs -o $OPTS,part_size=5 $S3_BUCKET $MP
 mkdir -p $M/fsx $M/stress
 
-# -W: no shared writable mmap (ks3fs refuses it); everything else fsx probes
+# mmap reads and writes are mixed in; everything else fsx probes
 # for (fallocate, clone, dedupe...) is skipped when unsupported
 run_fsx() {	# name args...
 	n=$1; shift
 	t0=$(date +%s)
-	if fsx -q -W "$@" > /tmp/fsx.$n.out 2>&1; then
+	if fsx -q "$@" > /tmp/fsx.$n.out 2>&1; then
 		ok "fsx $n ($(( $(date +%s) - t0 ))s)"
 	else
 		not_ok "fsx $n"
