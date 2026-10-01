@@ -1137,6 +1137,14 @@ int ks3fs_setattr(struct mnt_idmap *idmap, struct dentry *dentry,
 				return err;
 		}
 		if (attr->ia_size != i_size_read(inode)) {
+			/*
+			 * truncate(2) on a path passes no times, but a size
+			 * change must update mtime and ctime (as ext4 does)
+			 */
+			if (!(attr->ia_valid & ATTR_MTIME)) {
+				attr->ia_mtime = attr->ia_ctime = current_time(inode);
+				attr->ia_valid |= ATTR_MTIME | ATTR_CTIME;
+			}
 			truncate_setsize(inode, attr->ia_size);
 			inode->i_blocks = DIV_ROUND_UP_ULL(attr->ia_size, 512);
 			/* bytes past a shrink must read back as zeros if regrown */
