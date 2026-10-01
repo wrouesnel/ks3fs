@@ -77,9 +77,13 @@ mkdir -p "$ROOT/build/guest-bin"
 gcc -static -O2 -Wall -o "$ROOT/build/guest-bin/ks3test" "$ROOT/tests/guest-src/ks3test.c"
 has stress && "$ROOT/tools/build-xfstests-tools.sh" >/dev/null
 
+# the fixtures (thousands of objects) are only needed by these suites
+needs_fixtures() { has rw || has rw-tls || has tls || has faults || has keys; }
+
 seed_bucket() {
 	local b=$1
 	s3 s3api create-bucket --bucket "$b" >/dev/null
+	needs_fixtures || return 0
 	s3 s3 cp --quiet --recursive "$F" "s3://$b/"
 	# filesystem-backed servers refuse a key below an existing object
 	s3 s3api put-object --bucket "$b" --key shadow/inner >/dev/null 2>&1 || true

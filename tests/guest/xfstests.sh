@@ -7,6 +7,11 @@ mkdir -p $R
 check "mount the xfstests root disk" mount -t ext4 /dev/vda $R
 for d in proc sys dev; do mount --bind /$d $R/$d; done
 mount -t devpts devpts $R/dev/pts 2>/dev/null
+# bash process substitution needs /dev/fd (busybox's devtmpfs lacks it)
+ln -sfn /proc/self/fd $R/dev/fd
+ln -sfn /proc/self/fd/0 $R/dev/stdin
+ln -sfn /proc/self/fd/1 $R/dev/stdout
+ln -sfn /proc/self/fd/2 $R/dev/stderr
 mount -t tmpfs tmp $R/tmp
 cp /etc/ks3fs-test.env $R/etc/ks3fs-test.env
 cp -r /tests $R/
