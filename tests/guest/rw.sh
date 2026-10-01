@@ -108,7 +108,12 @@ check "rmdir empty" rmdir $M/newdir
 fails "rmdir'd dir gone" test -e $M2/newdir
 fails "mkdir existing" mkdir $M/dir1
 
+exec 8<$M/new.txt
 check "rename file" mv $M/new.txt $M/renamed.txt
+drop_caches
+# the open file reads through the ETag recorded from the copy
+eq "renamed file readable through an open fd" "$(cat <&8)" "new content"
+exec 8<&-
 eq "renamed content" "$(cat $M2/renamed.txt)" "new content"
 fails "old name gone" test -e $M2/new.txt
 echo victim > $M/victim.txt

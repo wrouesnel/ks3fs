@@ -471,35 +471,10 @@ static int s3_copy(struct ks3fs_sb_info *sbi, const char *src,
 		err = -EIO;
 	if (err) {
 		log_failure("COPY", dst, resp.status, body, len);
-	} else if (etag_out) {
-		const char *e = body ? strnstr(body, "<ETag>", len) : NULL;
-
+	} else if (etag_out &&
+		   ks3fs_xml_get(body, len, "ETag", etag_out, KS3FS_ETAG_LEN)) {
+		/* entity-decoded: MinIO writes the quotes as &#34;, AWS as &quot; */
 		etag_out[0] = '\0';
-		if (e) {
-			const char *q = strnstr(e, "</ETag>", len - (e - body));
-
-			if (q) {
-				size_t el = q - (e + 6);
-				char *t = kmemdup_nul(e + 6, el, GFP_NOFS);
-
-				/* the XML ETag has entity-escaped quotes */
-				if (t) {
-					char *r = t, *w = t;
-
-					while (*r) {
-						if (!strncmp(r, "&quot;", 6)) {
-							*w++ = '"';
-							r += 6;
-						} else {
-							*w++ = *r++;
-						}
-					}
-					*w = '\0';
-					strscpy(etag_out, t, KS3FS_ETAG_LEN);
-					kfree(t);
-				}
-			}
-		}
 	}
 	kvfree(body);
 	return err;
