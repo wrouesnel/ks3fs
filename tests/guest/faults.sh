@@ -28,6 +28,15 @@ bigsha() {	# sha of a read of $1; details on stderr if it is wrong
 		echo "#   $1: cat exit $rc, $(stat -c %s /tmp/big.got) of $(stat -c %s /tmp/big.ref) bytes $(head -c 200 /tmp/big.err)" >&2
 		cmp /tmp/big.ref /tmp/big.got 2>&1 | head -2 | sed 's/^/#   /' >&2
 		echo "#   differing bytes: $(cmp -l /tmp/big.ref /tmp/big.got 2>/dev/null | wc -l)" >&2
+		# the differing ranges (0-based, end exclusive), and where the
+		# first wrong bytes do occur in the object: a shifted stream or
+		# stale memory?
+		cmp -l /tmp/big.ref /tmp/big.got 2>/dev/null | awk '
+			{ o = $1 - 1; if (!n || o - e > 16) { if (n) printf "%d-%d ", s, e; s = o; n++ } e = o + 1 }
+			END { if (n) printf "%d-%d", s, e; print "" }' | cut -c1-400 | sed 's/^/#   ranges: /' >&2
+		first=$(cmp /tmp/big.ref /tmp/big.got 2>/dev/null | sed -n 's/.*char \([0-9]*\).*/\1/p')
+		[ -n "$first" ] && echo "#   wrong bytes at $((first - 1)) occur in the object at: $(ks3test locate /tmp/big.ref /tmp/big.got $((first - 1)) 64)" >&2
+		cp /tmp/big.got /tmp/big.bad	# for a closer look
 		dmesg | grep ks3fs: | tail -8 | sed 's/^/#   /' >&2
 	fi
 	rm -f /tmp/big.got
@@ -39,7 +48,8 @@ ctl "set?mode=normal"
 
 # ---- connections cut mid-transfer: GETs resume, PUTs restart
 c0=$(cuts)
-ctl "cut?dir=down&bytes=3000000&count=4"
+# small budgets: some servers (versitygw) answer each GET on its own connection
+ctl "cut?dir=down&bytes=200000&count=4"
 drop_caches
 eq "read survives 4 mid-body disconnects" "$(bigsha $M/big.bin)" "$BIG_SHA"
 c1=$(cuts)
@@ -170,7 +180,7 @@ check "parallel readahead is at least 3x faster" test $(( rd_16 * 3 )) -le "$rd_
 # ---- faults over TLS
 check "TLS mount via fault proxy" sh -c "umount $M2 && mount -t ks3fs -o addr=10.0.2.2,port=$FP_TLS,$CREDS,host=s3.ks3fs.test,tls,timeout=3,parallel=1 ks3test $M2"
 c0=$(cuts)
-ctl "cut?dir=down&bytes=3000000&count=3&port=$FP_TLS"
+ctl "cut?dir=down&bytes=200000&count=3&port=$FP_TLS"
 drop_caches
 eq "TLS read survives mid-record disconnects" "$(bigsha $M2/big.bin)" "$BIG_SHA"
 c1=$(cuts)

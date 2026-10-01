@@ -30,6 +30,9 @@
  *                           print the ACL in the same form
  *   ks3test asuser UID GID CMD [ARGS...]
  *                           run CMD with those ids (no supplementary groups)
+ *   ks3test locate REF GOT OFF LEN
+ *                           where in REF do GOT's bytes [OFF, OFF+LEN) occur?
+ *                           (prints every offset, or "nowhere")
  *   ks3test tmpfile DIR NAME DATA
  *                           open(DIR, O_TMPFILE, 0640), write DATA, and give
  *                           it NAME with linkat() (NAME "-": stay unnamed)
@@ -318,6 +321,44 @@ static int getacl(const char *path, const char *which)
 	return 0;
 }
 
+static char *slurp(const char *path, size_t *len)
+{
+	FILE *f = fopen(path, "rb");
+	char *buf = NULL;
+	long n;
+
+	if (!f || fseek(f, 0, SEEK_END) || (n = ftell(f)) < 0)
+		return NULL;
+	rewind(f);
+	buf = malloc(n + 1);
+	if (buf && fread(buf, 1, n, f) != (size_t)n) {
+		free(buf);
+		buf = NULL;
+	}
+	fclose(f);
+	*len = n;
+	return buf;
+}
+
+static int locate(const char *refp, const char *gotp, long off, long len)
+{
+	size_t rl, gl, i, hits = 0;
+	char *ref = slurp(refp, &rl), *got = slurp(gotp, &gl);
+
+	if (!ref || !got || off < 0 || len <= 0 || (size_t)(off + len) > gl) {
+		printf("cannot read or bad range\n");
+		return 1;
+	}
+	for (i = 0; i + len <= rl; i++)
+		if (!memcmp(ref + i, got + off, len)) {
+			printf("%s%zu", hits++ ? " " : "", i);
+			if (hits == 8)
+				break;
+		}
+	printf("%s\n", hits ? "" : "nowhere");
+	return 0;
+}
+
 static int do_tmpfile(const char *dir, const char *name, const char *data)
 {
 	char proc[64], path[4096];
@@ -397,6 +438,8 @@ int main(int argc, char **argv)
 		return setacl(argv[2], argv[3], argv[4]);
 	if (argc == 4 && !strcmp(argv[1], "getacl"))
 		return getacl(argv[2], argv[3]);
+	if (argc == 6 && !strcmp(argv[1], "locate"))
+		return locate(argv[2], argv[3], atol(argv[4]), atol(argv[5]));
 	if (argc == 5 && !strcmp(argv[1], "tmpfile"))
 		return do_tmpfile(argv[2], argv[3], argv[4]);
 	if (argc >= 5 && !strcmp(argv[1], "asuser"))
@@ -410,6 +453,7 @@ int main(int argc, char **argv)
 		"       setxattr FILE NAME VALUE|- [create|replace] |\n"
 		"       getxattr FILE NAME | listxattr FILE |\n"
 		"       setacl FILE access|default SPEC | getacl FILE access|default |\n"
-		"       asuser UID GID CMD [ARGS...] | tmpfile DIR NAME|- DATA\n");
+		"       asuser UID GID CMD [ARGS...] | tmpfile DIR NAME|- DATA |\n"
+		"       locate REF GOT OFF LEN\n");
 	return 2;
 }
