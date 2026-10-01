@@ -19,8 +19,9 @@ args=${XFSTESTS_ARGS:--g quick}
 [ -f /tests/xfstests.exclude ] && args="$args -E /tests/xfstests.exclude"
 echo "# xfstests $args"
 # shellcheck disable=SC2086
-./check $args > /tmp/check.out 2>&1
-rc=$?
+# stream progress to the console as it happens (per-test lines)
+./check $args 2>&1 | tee /tmp/check.out | sed -u 's/^/#   /'
+rc=${PIPESTATUS[0]}
 grep -E "^(Ran|Not run|Failures|Failed|Passed)" /tmp/check.out | sed 's/^/# /'
 for t in $(sed -n 's/^Failures: //p' /tmp/check.out); do
 	echo "not ok - xfstests $t"

@@ -8,11 +8,21 @@
 #   SUITES=nixstore tests/run.sh      (Nix store on ks3fs; slow, needs internet)
 #   SUITES=big tests/run.sh           (6 GiB object in a 1 GiB guest; slow)
 #   SUITES=stress tests/run.sh        (xfstests fsx + fsstress)
+#   SUITES=xfstests XFSTESTS_ARGS="-g quick" tests/run.sh
+#                                     (xfstests on an Ubuntu root disk; slow)
 #
 # Needs: qemu-system-x86_64, static busybox, aws CLI, curl, gcc and the
 # chosen S3 server (see tests/servers.sh).
 set -euo pipefail
-ROOT=$(cd "$(dirname "$0")/.." && pwd)
+# Run from a private copy: bash reads scripts as it goes, so editing this
+# file during a long test run would otherwise corrupt the run.
+if [ -z "${KS3_RUN_COPY:-}" ]; then
+	copy=$(mktemp "${TMPDIR:-/tmp}/ks3fs-$(basename "$0").XXXXXX")
+	cp "$0" "$copy"
+	KS3_RUN_COPY=$copy KS3_RUN_SELF=$(realpath "$0") exec bash "$copy" "$@"
+fi
+rm -f "$KS3_RUN_COPY"	# bash already has it open
+ROOT=$(cd "$(dirname "$KS3_RUN_SELF")/.." && pwd)
 KVER=${1:-6.8.0-136-generic}
 SUITES=${SUITES:-rw rw-tls tls faults keys nix}
 OUT=$ROOT/build/out/$KVER
@@ -27,7 +37,7 @@ cleanup() {
 	rm -rf "${FIXTURES:-}"
 }
 has() { [[ " $SUITES " == *" $1 "* ]]; }
-needs_server() { has rw || has rw-tls || has tls || has faults || has nixstore || has big || has stress || has keys; }
+needs_server() { has rw || has rw-tls || has tls || has faults || has nixstore || has big || has stress || has keys || has xfstests; }
 needs_tls() { has rw-tls || has tls || has faults; }
 trap cleanup EXIT
 
@@ -102,6 +112,10 @@ if needs_server; then
 		log "seeding bucket $b on port $PORT"
 		seed_bucket "$b"
 	done
+	if has xfstests; then
+		s3 s3api create-bucket --bucket xfstest >/dev/null
+		s3 s3api create-bucket --bucket xfscratch >/dev/null
+	fi
 	if has nixstore; then
 		# an empty bucket for the store, and the package source to build
 		. "$ROOT/tests/nix/pins.env"
@@ -189,6 +203,13 @@ fi
 
 if has stress; then
 	export VM_TIMEOUT=${VM_TIMEOUT:-3000}
+fi
+if has xfstests; then
+	# an Ubuntu root disk with xfstests (built once, cached)
+	"$ROOT/tools/build-xfstests-rootfs.sh" >/dev/null
+	export ROOT_DISK=$ROOT/build/xfstests-rootfs.img
+	export VM_MEM=${VM_MEM:-4096} VM_CPUS=${VM_CPUS:-4} VM_TIMEOUT=${VM_TIMEOUT:-10800}
+	echo "XFSTESTS_ARGS=\"${XFSTESTS_ARGS:--g quick}\"" >>"$ENVF"
 fi
 if has big; then
 	# prove memory stays bounded: several times more data than guest RAM

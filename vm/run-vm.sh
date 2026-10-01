@@ -3,8 +3,16 @@
 #   vm/run-vm.sh <kver> <ks3fs.ko> <env-file> [log]
 # Exits 0 only if the guest reports success.
 set -euo pipefail
+# Run from a private copy: bash reads scripts as it goes, so editing this
+# file during a long test run would otherwise corrupt the run.
+if [ -z "${KS3_VM_COPY:-}" ]; then
+	copy=$(mktemp "${TMPDIR:-/tmp}/ks3fs-$(basename "$0").XXXXXX")
+	cp "$0" "$copy"
+	KS3_VM_COPY=$copy KS3_VM_SELF=$(realpath "$0") exec bash "$copy" "$@"
+fi
+rm -f "$KS3_VM_COPY"	# bash already has it open
 KVER=$1 MOD=$2 ENVF=$3 LOG=${4:-}
-ROOT=$(cd "$(dirname "$0")/.." && pwd)
+ROOT=$(cd "$(dirname "$KS3_VM_SELF")/.." && pwd)
 KDIR=$ROOT/build/kernels/$KVER
 [ -f "$KDIR/vmlinuz" ] || "$ROOT/vm/fetch-kernel.sh" "$KVER" >/dev/null
 
