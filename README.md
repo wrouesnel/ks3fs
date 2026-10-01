@@ -68,6 +68,14 @@ No maintained in-kernel S3 filesystem was found.
     maximum).
 - **Rename** of a file is a copy followed by DELETE; objects over 5 GiB use a
   multipart copy.
+- **Unlink while open** ("silly rename", as NFS does). An object that is
+  unlinked or renamed over while a file has it open is moved to a hidden
+  `.ks3fs-orphans/` prefix at the mount root. It is deleted at the last
+  close, so the open file can still read data it hasn't cached. Orphans are
+  hidden from listings and lookups. A crash can leave some behind.
+- **Readahead** windows are split into 256 KiB chunks fetched concurrently
+  (up to `parallel=`). At 20 ms latency, a 20 MB read takes 1.4 s instead
+  of 6.8 s.
 - **Directory rename** has no S3 equivalent, so it happens in stages:
   1. Pending metadata below the directory is stored first.
   2. Every object below the directory is copied to the new prefix, in
@@ -156,7 +164,8 @@ options:
 | `retry_timeout=` | soft mounts: seconds to keep retrying (default 60) |
 | `nometa` | don't store POSIX metadata. Fixed modes, no symlinks, faster listings. |
 | `part_size=` | multipart part size in MiB, 5–5120 (default 16). The largest object is 10,000 × this. |
-| `parallel=` | concurrent requests for directory renames, prefetch and part copies (default 16) |
+| `parallel=` | concurrent requests for readahead, directory renames, prefetch and part copies (default 16) |
+| `creds_key=NAME` | read credentials from the "logon" key `ks3fs:NAME` in the kernel keyring instead of mount options: `access_key`, `secret_key` and an optional `session_token` on separate lines. Re-read for every request, so `keyctl update` rotates credentials without a remount. `mount.ks3fs` uses this automatically for `credentials=` files when `keyctl` is installed. |
 
 ## Limitations
 
@@ -228,6 +237,17 @@ module with DKMS on install and removes it on uninstall.
      - a read that stays correct under a 2 ms `SIGALRM` storm;
      - `ls -l` at 20 ms latency, which must be at least 3× faster with
        parallel prefetch.
+   - `keys` has 15 checks for `creds_key=`: mounting, rotating to a wrong
+     secret and back without a remount, revoking, and malformed or missing
+     keys.
+   - `stress` (opt-in) runs xfstests' `fsx` four ways. Its random I/O is
+     checked against an in-memory model, on normal and `part_size=5`
+     multipart files. The stored object must match through a second mount.
+     Then 4-process `fsstress` runs for a fixed time, with a watchdog that
+     dumps kernel stacks. It found two multipart bugs that are now fixed.
+   - `xfstests` (opt-in; hours) boots an Ubuntu root image
+     (`tools/build-xfstests-rootfs.sh`) and runs xfstests with
+     `FSTYP=ks3fs`, set with `XFSTESTS_ARGS` (default `-g quick`).
    - `big` has 16 checks (opt-in; slow). It runs in a 1 GiB guest:
      - writes a 6 GiB object, reads it back and verifies the hash;
      - appends to it, which copies the 384 unchanged parts server-side;
@@ -250,6 +270,9 @@ module with DKMS on install and removes it on uninstall.
 tests/run.sh 6.8.0-138-generic                  # one kernel, default suites
 SUITES=nixstore tests/run.sh                    # Nix store on ks3fs
 SUITES=big tests/run.sh                         # 6 GiB object in a 1 GiB guest
+SUITES=stress tests/run.sh                      # fsx + fsstress
+SUITES=xfstests XFSTESTS_ARGS="generic/001 generic/013" tests/run.sh
+tests/run.sh 7.3.0-070300rc3-generic            # a mainline kernel (kernel.ubuntu.com)
 S3_SERVER=rgw SUITES=rw tests/run.sh            # against Ceph RGW
 tests/matrix.sh                                 # every kernel in tests/kernels.txt
 vm/build-debug-kernel.sh && tests/run.sh 6.8.0-debug   # Noble source + KASAN/lockdep/kmemleak/UBSAN
@@ -258,7 +281,13 @@ packaging/test-dkms.sh build/deb/*.deb $(tests/resolve-kernels.sh)
 
 In `tests/kernels.txt`, `<series>-latest` entries resolve to the newest Ubuntu
 ABI in the apt index, so the weekly CI run exercises each new Noble kernel
-release when it lands.
+release when it lands. Mainline kernels (for example `7.3.0-070300rc3-generic`)
+are fetched from Ubuntu's mainline archive. When the kernel was built with a
+compiler Noble lacks, the module is built in an Ubuntu 26.04 container
+(`tools/container-make.sh`).
+
+`run.sh` and `run-vm.sh` run from private copies of themselves, so editing
+them can't corrupt a test in progress.
 
 MinIO no longer publishes binaries or images, and its repository was archived
 in 2026. `tools/build-minio.sh` builds the last community release from source.
@@ -279,6 +308,9 @@ three is what caught the servers that ignore `encoding-type=url`.
   lockdep, kmemleak and UBSAN (the kernel build is cached).
 - **vm-test-nixstore** runs the Nix store suite on the newest GA and HWE
   kernels.
+- **vm-test-stress** runs fsx and fsstress on the newest kernel.
+- **mainline** builds and VM-tests the newest mainline kernel (release or
+  -rc) as an early warning for VFS API drift. Its failures don't fail CI.
 - **dkms** installs the `.deb` into a clean Noble container with headers for
   every matrix kernel.
 
@@ -286,11 +318,10 @@ A weekly schedule picks up new kernel ABIs.
 
 ## Roadmap
 
-1. DNS via the `dns_resolver` key type as an alternative to the mount helper.
+1. Triage the xfstests `quick` group, keep an expected-results list, and run
+   it in CI on a schedule.
+2. DNS via the `dns_resolver` key type as an alternative to the mount helper.
    Client certificates (mutual TLS) via `tls_client_hello_x509` and the keyring.
-2. Credentials from the kernel keyring, and refreshable session tokens.
-3. Run xfstests (the `generic/` subset that applies) and `fsx` in the guest.
-4. Large folios, and parallel ranged GETs for sequential reads.
-5. Mainline-kernel build job to catch VFS API drift early.
-6. Background (workqueue) part uploads, so a writer isn't paused while a
+3. Large folios.
+4. Background (workqueue) part uploads, so a writer isn't paused while a
    part goes out.
