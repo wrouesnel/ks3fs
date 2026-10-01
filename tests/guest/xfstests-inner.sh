@@ -19,10 +19,27 @@ args=${XFSTESTS_ARGS:--g quick}
 # check wants options before test names
 [ -f /tests/xfstests.exclude ] && args="-E /tests/xfstests.exclude $args"
 echo "# xfstests $args"
+# a test that makes no progress for STALL_SECS gets the kernel's view of
+# every CPU and blocked task dumped to the console (sysrq l and w)
+STALL_SECS=${XFSTESTS_STALL_SECS:-900}
+(
+	echo 1 > /proc/sys/kernel/sysrq
+	while sleep 60; do
+		age=$(( $(date +%s) - $(stat -c %Y /tmp/check.out 2>/dev/null || date +%s) ))
+		[ "$age" -ge "$STALL_SECS" ] || continue
+		echo "#   no progress for ${age}s: dumping kernel state"
+		echo 8 > /proc/sys/kernel/printk
+		echo l > /proc/sysrq-trigger
+		echo w > /proc/sysrq-trigger
+		touch /tmp/check.out	# next dump after another STALL_SECS
+	done
+) &
+watchdog=$!
 # shellcheck disable=SC2086
 # stream progress to the console as it happens (per-test lines)
 ./check $args 2>&1 | tee /tmp/check.out | sed -u 's/^/#   /'
 rc=${PIPESTATUS[0]}
+kill $watchdog 2>/dev/null
 grep -E "^(Ran|Not run|Failures|Failed|Passed)" /tmp/check.out | sed 's/^/# /'
 for t in $(sed -n 's/^Failures: //p' /tmp/check.out); do
 	echo "not ok - xfstests $t"
