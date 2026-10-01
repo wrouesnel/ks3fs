@@ -16,7 +16,8 @@ export MOUNT_OPTIONS="$opts"
 export TEST_FS_MOUNT_OPTS="$opts"
 CONF
 args=${XFSTESTS_ARGS:--g quick}
-[ -f /tests/xfstests.exclude ] && args="$args -E /tests/xfstests.exclude"
+# check wants options before test names
+[ -f /tests/xfstests.exclude ] && args="-E /tests/xfstests.exclude $args"
 echo "# xfstests $args"
 # shellcheck disable=SC2086
 # stream progress to the console as it happens (per-test lines)

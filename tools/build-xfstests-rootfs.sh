@@ -30,13 +30,17 @@ grep -c ks3fs common/rc
 make -j\$(nproc) >/dev/null 2>&1
 make install >/dev/null 2>&1
 mkdir -p /mnt/test /mnt/scratch
+# the unprivileged users some tests need
+useradd -m fsgqa && useradd fsgqa2 && useradd 123456-fsgqa
 # copy the root filesystem (one file system only) and make the image
 mkdir /rootfs
 tar -C / --one-file-system --exclude=./rootfs --exclude=./x --exclude=./out \
 	--exclude=./proc --exclude=./sys --exclude=./dev -cf - . | tar -C /rootfs -xf -
 rm -rf /rootfs/var/cache/apt/archives/*.deb /rootfs/var/lib/apt/lists/*
 mkdir -p /rootfs/proc /rootfs/sys /rootfs/dev /rootfs/tmp /rootfs/run
-mke2fs -q -t ext4 -L xfstests-root -d /rootfs /out/xfstests-rootfs.img 6G
+mke2fs -q -t ext4 -L xfstests-root -d /rootfs /out/xfstests-rootfs.img.new 6G
 "
+# rename into place: VMs still running on the old image keep their copy
+mv "$IMG.new" "$IMG"
 echo "$want" >"$STAMP"
 ls -la "$IMG"
