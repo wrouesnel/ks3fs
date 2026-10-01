@@ -1,0 +1,7 @@
+ks3fs (0.3.0-1) noble; urgency=medium
+
+  * Initial release: in-kernel S3 filesystem as a DKMS module, with TLS,
+    multipart uploads, shared writable mmap, fallocate, user xattrs and
+    POSIX ACLs, O_TMPFILE and keyring credentials.
+
+ -- Will Rouesnel <wrouesnel@wrouesnel.com>  Fri, 02 Oct 2026 06:40:45 +1000

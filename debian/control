@@ -1,0 +1,22 @@
+Source: ks3fs
+Section: kernel
+Priority: optional
+Maintainer: Will Rouesnel <wrouesnel@wrouesnel.com>
+Build-Depends: debhelper-compat (= 13), dh-sequence-dkms
+Standards-Version: 4.6.2
+Rules-Requires-Root: no
+Homepage: https://github.com/wrouesnel/ks3fs
+Vcs-Browser: https://github.com/wrouesnel/ks3fs
+Vcs-Git: https://github.com/wrouesnel/ks3fs.git
+
+Package: ks3fs-dkms
+Architecture: all
+Depends: ${misc:Depends}
+Recommends: linux-headers-generic | linux-headers, ktls-utils
+Description: in-kernel S3 object store filesystem (DKMS)
+ ks3fs mounts an S3-compatible bucket as a filesystem without FUSE: reads
+ and writes go through the page cache, large files are stored with
+ multipart uploads, and TLS uses the kernel's TLS with tlshd.
+ .
+ This package builds the module with DKMS for every installed kernel and
+ ships the mount.ks3fs helper (DNS names, keyring credentials).

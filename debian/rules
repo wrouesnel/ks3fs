@@ -1,0 +1,22 @@
+#!/usr/bin/make -f
+include /usr/share/dpkg/pkg-info.mk
+
+SRC := debian/ks3fs-dkms/usr/src/ks3fs-$(DEB_VERSION_UPSTREAM)
+
+%:
+	dh $@
+
+# Nothing is compiled here: DKMS builds the module on the target system.
+override_dh_auto_configure override_dh_auto_build override_dh_auto_test override_dh_auto_install:
+
+override_dh_install:
+	@v=$$(sed -n 's/^PACKAGE_VERSION="\(.*\)"/\1/p' dkms.conf); \
+	[ "$$v" = "$(DEB_VERSION_UPSTREAM)" ] || \
+		{ echo "dkms.conf says $$v, debian/changelog $(DEB_VERSION_UPSTREAM)"; exit 1; }
+	install -d $(SRC)/src
+	install -m 644 dkms.conf $(SRC)/
+	install -m 644 src/*.c src/*.h src/Kbuild src/Makefile $(SRC)/src/
+	install -D -m 755 tools/mount.ks3fs debian/ks3fs-dkms/usr/sbin/mount.ks3fs
+
+override_dh_dkms:
+	dh_dkms -V $(DEB_VERSION_UPSTREAM) -- dkms.conf

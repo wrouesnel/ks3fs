@@ -387,8 +387,14 @@ jobs:
     runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v4
-      - name: Build ks3fs-dkms package
+      - name: Install packaging tools
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq --no-install-recommends debhelper dh-dkms devscripts
+      - name: Build ks3fs-dkms package (from debian/, as the PPA does)
         run: packaging/build-deb.sh "$PWD/dist"
+      - name: Build the source package (unsigned)
+        run: packaging/build-source.sh dist/source noble
       - name: Install via DKMS against every matrix kernel (build only)
         run: |
           mapfile -t kernels < <(jq -r '.[]' <<<'${{ needs.kernels.outputs.matrix }}')

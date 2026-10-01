@@ -12,6 +12,9 @@ export DEBIAN_FRONTEND=noninteractive
 apt-get update -qq >/dev/null
 apt-get install -y -qq --no-install-recommends dkms kmod gcc-13 gcc-14 make $HDRS >/dev/null
 apt-get install -y -qq --no-install-recommends /deb/$(basename "$DEB") 2>&1 | grep -E 'ks3fs|Error|error' || true
+# the package builds for the running and newest kernels; the others are
+# built by the kernels' own DKMS hooks (headers installed, boot), as here
+for k in $*; do dkms autoinstall -k \$k >/dev/null 2>&1 || true; done
 dkms status
 rc=0
 for k in $*; do

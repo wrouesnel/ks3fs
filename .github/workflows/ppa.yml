@@ -1,0 +1,70 @@
+name: ppa
+
+# Release tags (v0.3.0) upload source packages to the Launchpad PPA, which
+# builds ks3fs-dkms for each Ubuntu series.  Tag a commit only after its CI
+# is green.  A manual run builds and signs without uploading unless asked.
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
+    inputs:
+      upload:
+        description: "Upload to the PPA (otherwise build and sign only)"
+        type: boolean
+        default: false
+
+permissions:
+  contents: read
+
+env:
+  PPA: ppa:wrouesnel/ks3fs
+  # Ubuntu series to build for, each as <version>-<rev>~<series>1
+  SERIES: noble
+
+jobs:
+  source:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install packaging tools
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq --no-install-recommends \
+            debhelper dh-dkms devscripts dput gnupg
+      - name: Check the tag against debian/changelog
+        if: startsWith(github.ref, 'refs/tags/')
+        run: |
+          version=$(dpkg-parsechangelog -S Version)
+          [ "${version%-*}" = "${GITHUB_REF_NAME#v}" ] || {
+            echo "::error::tag $GITHUB_REF_NAME but debian/changelog is $version"; exit 1; }
+      - name: Import the signing key
+        env:
+          PPA_GPG_PRIVATE_KEY: ${{ secrets.PPA_GPG_PRIVATE_KEY }}
+          PPA_GPG_PASSPHRASE: ${{ secrets.PPA_GPG_PASSPHRASE }}
+        run: |
+          [ -n "$PPA_GPG_PRIVATE_KEY" ] || { echo "::error::PPA_GPG_PRIVATE_KEY is not set"; exit 1; }
+          gpg --batch --import <<<"$PPA_GPG_PRIVATE_KEY"
+          keyid=$(gpg --list-secret-keys --with-colons | awk -F: '/^fpr/ {print $10; exit}')
+          echo "KEYID=$keyid" >> "$GITHUB_ENV"
+          umask 077
+          printf '%s' "$PPA_GPG_PASSPHRASE" > "$RUNNER_TEMP/passphrase"
+          # debsign calls this instead of gpg: no pinentry on a runner
+          cat > "$RUNNER_TEMP/gpg-sign" <<SH
+          #!/bin/sh
+          exec gpg --batch --pinentry-mode loopback --passphrase-file "$RUNNER_TEMP/passphrase" "\$@"
+          SH
+          chmod 755 "$RUNNER_TEMP/gpg-sign"
+      - name: Build signed source packages
+        env:
+          SIGN_COMMAND: ${{ runner.temp }}/gpg-sign
+        run: |
+          # shellcheck disable=SC2086
+          packaging/build-source.sh -k "$KEYID" dist $SERIES
+          for c in dist/*_source.changes; do gpg --verify "$c"; done
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ppa-source
+          path: dist/
+      - name: Upload to ${{ env.PPA }}
+        if: startsWith(github.ref, 'refs/tags/') || inputs.upload
+        run: dput "$PPA" dist/*_source.changes
