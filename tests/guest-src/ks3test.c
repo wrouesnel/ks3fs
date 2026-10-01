@@ -22,7 +22,16 @@
  *                           prints strerror on failure
  *   ks3test getxattr FILE NAME   print the value (or strerror)
  *   ks3test listxattr FILE       print the names, one per line
+ *   ks3test setacl FILE access|default SPEC
+ *                           set a POSIX ACL; SPEC is a comma list of
+ *                           u::rw-, u:1000:r--, g::r--, g:5:rwx, m::r--,
+ *                           o::--- entries ("-" alone removes the ACL)
+ *   ks3test getacl FILE access|default
+ *                           print the ACL in the same form
+ *   ks3test asuser UID GID CMD [ARGS...]
+ *                           run CMD with those ids (no supplementary groups)
  */
+#define _GNU_SOURCE
 #include <errno.h>
 #include <fcntl.h>
 #include <signal.h>
@@ -32,6 +41,8 @@
 #include <sys/mman.h>
 #include <sys/time.h>
 #include <sys/xattr.h>
+#include <grp.h>
+#include <stdint.h>
 #include <sys/syscall.h>
 #include <unistd.h>
 
@@ -208,6 +219,117 @@ static int xattr_cmd(int argc, char **argv)
 	return 0;
 }
 
+/* the kernel's xattr form of a POSIX ACL (posix_acl_xattr.h) */
+struct acl_ent { uint16_t tag, perm; uint32_t id; };
+static const struct { char c; uint16_t tag; } acl_tags[] = {
+	{ 'u', 0x01 }, { 'g', 0x04 }, { 'm', 0x10 }, { 'o', 0x20 },
+};
+
+static const char *acl_xattr(const char *which)
+{
+	return !strcmp(which, "default") ? "system.posix_acl_default" :
+					   "system.posix_acl_access";
+}
+
+static int acl_cmp(const void *a, const void *b)
+{
+	const struct acl_ent *x = a, *y = b;
+
+	if (x->tag != y->tag)
+		return x->tag - y->tag;
+	return x->id < y->id ? -1 : x->id > y->id;
+}
+
+static int setacl(const char *path, const char *which, const char *spec)
+{
+	struct { uint32_t version; struct acl_ent e[32]; } buf = { 2 };
+	char s[512], *tok, *save;
+	int n = 0;
+
+	if (!strcmp(spec, "-")) {
+		if (removexattr(path, acl_xattr(which))) {
+			printf("%s\n", strerror(errno));
+			return 1;
+		}
+		return 0;
+	}
+	snprintf(s, sizeof(s), "%s", spec);
+	for (tok = strtok_r(s, ",", &save); tok && n < 32;
+	     tok = strtok_r(NULL, ",", &save)) {
+		char *id = strchr(tok, ':'), *perm = id ? strchr(id + 1, ':') : NULL;
+		struct acl_ent *e = &buf.e[n++];
+		size_t i;
+
+		if (!perm) {
+			fprintf(stderr, "bad entry %s\n", tok);
+			return 2;
+		}
+		e->tag = 0;
+		for (i = 0; i < sizeof(acl_tags) / sizeof(acl_tags[0]); i++)
+			if (tok[0] == acl_tags[i].c)
+				e->tag = acl_tags[i].tag;
+		e->id = (uint32_t)-1;
+		if (perm > id + 1) {	/* named user or group */
+			e->tag <<= 1;
+			e->id = strtoul(id + 1, NULL, 10);
+		}
+		e->perm = (strchr(perm, 'r') ? 4 : 0) | (strchr(perm, 'w') ? 2 : 0) |
+			  (strchr(perm, 'x') ? 1 : 0);
+	}
+	qsort(buf.e, n, sizeof(buf.e[0]), acl_cmp);
+	if (setxattr(path, acl_xattr(which), &buf, 4 + n * sizeof(buf.e[0]), 0)) {
+		printf("%s\n", strerror(errno));
+		return 1;
+	}
+	return 0;
+}
+
+static int getacl(const char *path, const char *which)
+{
+	struct { uint32_t version; struct acl_ent e[32]; } buf;
+	ssize_t len = getxattr(path, acl_xattr(which), &buf, sizeof(buf));
+	int i, n;
+
+	if (len < 0) {
+		printf("%s\n", strerror(errno));
+		return 1;
+	}
+	n = (len - 4) / sizeof(buf.e[0]);
+	for (i = 0; i < n; i++) {
+		struct acl_ent *e = &buf.e[i];
+		int named = e->tag == 0x02 || e->tag == 0x08;	/* u:ID, g:ID */
+		uint16_t base = named ? e->tag >> 1 : e->tag;
+		char c = '?';
+		size_t k;
+
+		for (k = 0; k < sizeof(acl_tags) / sizeof(acl_tags[0]); k++)
+			if (acl_tags[k].tag == base)
+				c = acl_tags[k].c;
+		printf("%s%c:", i ? "," : "", c);
+		if (named)
+			printf("%u", e->id);
+		printf(":%c%c%c", e->perm & 4 ? 'r' : '-', e->perm & 2 ? 'w' : '-',
+		       e->perm & 1 ? 'x' : '-');
+	}
+	printf("\n");
+	return 0;
+}
+
+static int asuser(char **argv)
+{
+	gid_t gid = strtoul(argv[3], NULL, 10);
+
+	if (setgroups(0, NULL) || setresgid(gid, gid, gid) ||
+	    setresuid(strtoul(argv[2], NULL, 10), strtoul(argv[2], NULL, 10),
+		      strtoul(argv[2], NULL, 10))) {
+		perror("asuser");
+		return 1;
+	}
+	execvp(argv[4], argv + 4);
+	perror(argv[4]);
+	return 127;
+}
+
 int main(int argc, char **argv)
 {
 	if (argc == 3 && !strcmp(argv[1], "sigread"))
@@ -248,6 +370,12 @@ int main(int argc, char **argv)
 	    (argc == 4 && !strcmp(argv[1], "getxattr")) ||
 	    (argc == 3 && !strcmp(argv[1], "listxattr")))
 		return xattr_cmd(argc, argv);
+	if (argc == 5 && !strcmp(argv[1], "setacl"))
+		return setacl(argv[2], argv[3], argv[4]);
+	if (argc == 4 && !strcmp(argv[1], "getacl"))
+		return getacl(argv[2], argv[3]);
+	if (argc >= 5 && !strcmp(argv[1], "asuser"))
+		return asuser(argv);
 	if ((argc == 3 || argc == 4) && !strcmp(argv[1], "pattern"))
 		return pattern(parse_size(argv[2]),
 			       argc == 4 ? strtoull(argv[3], NULL, 0) : 1);
@@ -255,6 +383,8 @@ int main(int argc, char **argv)
 		"       addkey TYPE DESC PAYLOAD | revokekey ID |\n"
 		"       fallocate MODE OFF LEN FILE | mmapwrite FILE OFF STRING |\n"
 		"       setxattr FILE NAME VALUE|- [create|replace] |\n"
-		"       getxattr FILE NAME | listxattr FILE\n");
+		"       getxattr FILE NAME | listxattr FILE |\n"
+		"       setacl FILE access|default SPEC | getacl FILE access|default |\n"
+		"       asuser UID GID CMD [ARGS...]\n");
 	return 2;
 }

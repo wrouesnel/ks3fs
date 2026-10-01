@@ -763,6 +763,9 @@ static int ks3fs_fill_super(struct super_block *sb, struct fs_context *fc)
 	sb->s_magic = KS3FS_MAGIC;
 	sb->s_op = &ks3fs_sops;
 	sb->s_xattr = ks3fs_xattr_handlers;
+	/* ACLs need somewhere to keep the mode they are checked against */
+	if (sbi->meta)
+		sb->s_flags |= SB_POSIXACL;
 	ks3_set_d_op(sb, &ks3fs_dops);
 	sb->s_maxbytes = MAX_LFS_FILESIZE;
 	sb->s_blocksize = PAGE_SIZE;

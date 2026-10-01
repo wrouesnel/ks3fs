@@ -8,6 +8,9 @@
 #define _KS3FS_COMPAT_H
 
 #include <linux/version.h>
+#include <linux/slab.h>
+#include <linux/posix_acl.h>
+#include <linux/posix_acl_xattr.h>
 
 /* ->write_begin/->write_end: page (<6.12), folio (6.12+), kiocb (6.17+) */
 #if LINUX_VERSION_CODE >= KERNEL_VERSION(6, 17, 0)
@@ -73,6 +76,25 @@
 #define KS3_CREATE_EXCL
 #else
 #define KS3_CREATE_EXCL		, bool excl
+#endif
+
+/* posix_acl_to_xattr() allocates the buffer itself since 7.0 */
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(7, 0, 0)
+#define ks3_acl_to_xattr(acl, lenp)	\
+	posix_acl_to_xattr(&init_user_ns, acl, lenp, GFP_KERNEL)
+#else
+static inline void *ks3_acl_to_xattr(const struct posix_acl *acl, size_t *lenp)
+{
+	size_t len = posix_acl_xattr_size(acl->a_count);
+	void *buf = kmalloc(len, GFP_KERNEL);
+
+	if (buf && posix_acl_to_xattr(&init_user_ns, acl, buf, len) < 0) {
+		kfree(buf);
+		buf = NULL;
+	}
+	*lenp = len;
+	return buf;
+}
 #endif
 
 #define secs_to_jiffies_compat(s)	msecs_to_jiffies((s) * 1000U)

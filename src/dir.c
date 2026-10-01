@@ -15,6 +15,8 @@
 #include <linux/wait.h>
 #include <linux/kref.h>
 
+#include <linux/posix_acl.h>
+
 #include "ks3fs.h"
 
 char *ks3fs_child_key(struct inode *dir, const struct qstr *name, bool is_dir)
@@ -502,11 +504,37 @@ static struct ks3fs_meta *new_meta(struct inode *dir, umode_t mode,
 	return m;
 }
 
+/*
+ * Metadata for a new file or directory: the parent's default ACL (and,
+ * without one, the umask, which the VFS leaves to ACL filesystems)
+ * shapes the mode and the ACLs it starts with.  Release with
+ * ks3fs_meta_release().
+ */
+static int new_meta_acl(struct inode *dir, umode_t mode,
+			struct ks3fs_meta *m, struct ks3fs_meta **out)
+{
+	struct posix_acl *default_acl, *acl;
+	int err;
+
+	ks3fs_meta_clear(m);
+	err = posix_acl_create(dir, &mode, &default_acl, &acl);
+	if (err)
+		return err;
+	*out = new_meta(dir, mode, m);
+	if (!*out) {
+		posix_acl_release(default_acl);
+		posix_acl_release(acl);
+		return 0;
+	}
+	return ks3fs_acl_header(default_acl, acl, &m->xattr);
+}
+
 static int ks3fs_create(struct mnt_idmap *idmap, struct inode *dir,
 			struct dentry *dentry, umode_t mode KS3_CREATE_EXCL)
 {
 	struct ks3fs_sb_info *sbi = KS3_SB(dir->i_sb);
 	struct ks3fs_attr attr = {};
+	struct ks3fs_meta *meta;
 	struct inode *inode;
 	char *key;
 	int err;
@@ -517,10 +545,11 @@ static int ks3fs_create(struct mnt_idmap *idmap, struct inode *dir,
 	if (IS_ERR(key))
 		return PTR_ERR(key);
 
+	err = new_meta_acl(dir, S_IFREG | mode, &attr.meta, &meta);
+	if (err)
+		goto out;
 	/* create the object now so it is visible and permissions are checked */
-	err = ks3fs_s3_put_buf(sbi, key, NULL, 0,
-			       new_meta(dir, S_IFREG | mode, &attr.meta),
-			       attr.etag);
+	err = ks3fs_s3_put_buf(sbi, key, NULL, 0, meta, attr.etag);
 	if (err)
 		goto out;
 	inode = ks3fs_new_inode(dir->i_sb, key, &attr);
@@ -533,6 +562,7 @@ static int ks3fs_create(struct mnt_idmap *idmap, struct inode *dir,
 	ks3fs_dir_forget_snap(dir);
 	inode_set_mtime_to_ts(dir, inode_set_ctime_current(dir));
 out:
+	ks3fs_meta_release(&attr.meta);
 	kfree(key);
 	return err;
 }
@@ -542,6 +572,7 @@ static KS3_MKDIR_RET ks3fs_mkdir(struct mnt_idmap *idmap, struct inode *dir,
 {
 	struct ks3fs_sb_info *sbi = KS3_SB(dir->i_sb);
 	struct ks3fs_attr attr = { .is_dir = true, .has_marker = true };
+	struct ks3fs_meta *meta;
 	struct inode *inode;
 	char *key;
 	int err;
@@ -549,8 +580,9 @@ static KS3_MKDIR_RET ks3fs_mkdir(struct mnt_idmap *idmap, struct inode *dir,
 	key = ks3fs_child_key(dir, &dentry->d_name, true);
 	if (IS_ERR(key))
 		return KS3_MKDIR_RETURN(PTR_ERR(key));
-	err = ks3fs_s3_put_buf(sbi, key, NULL, 0,
-			       new_meta(dir, S_IFDIR | mode, &attr.meta), NULL);
+	err = new_meta_acl(dir, S_IFDIR | mode, &attr.meta, &meta);
+	if (!err)
+		err = ks3fs_s3_put_buf(sbi, key, NULL, 0, meta, NULL);
 	if (!err) {
 		inode = ks3fs_new_inode(dir->i_sb, key, &attr);
 		if (IS_ERR(inode)) {
@@ -561,6 +593,7 @@ static KS3_MKDIR_RET ks3fs_mkdir(struct mnt_idmap *idmap, struct inode *dir,
 			ks3fs_dir_forget_snap(dir);
 		}
 	}
+	ks3fs_meta_release(&attr.meta);
 	kfree(key);
 #if LINUX_VERSION_CODE >= KERNEL_VERSION(6, 15, 0)
 	return err ? ERR_PTR(err) : NULL;
@@ -1008,6 +1041,8 @@ const struct inode_operations ks3fs_dir_iops = {
 	.setattr	= ks3fs_setattr,
 	.getattr	= ks3fs_getattr,
 	.listxattr	= ks3fs_listxattr,
+	.get_inode_acl	= ks3fs_get_acl,
+	.set_acl	= ks3fs_set_acl,
 };
 
 const struct file_operations ks3fs_dir_fops = {

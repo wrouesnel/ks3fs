@@ -1,7 +1,9 @@
 // SPDX-License-Identifier: GPL-2.0
 /*
- * User extended attributes, stored in the s3fs-fuse layout: one header,
+ * Extended attributes (user.* and POSIX ACLs), stored in the s3fs-fuse
+ * layout: one header,
  *   x-amz-meta-xattr: urlencode({"user.name":"<base64 value>",...})
+ * (ACLs as system.posix_acl_access/default, in their xattr form),
  * fetched with the object's HEAD and rewritten with its other metadata.
  * S3 limits user metadata to 2 KiB per object, which bounds the total.
  *
@@ -14,6 +16,8 @@
 #include <linux/ctype.h>
 #include <linux/hex.h>
 #include <linux/xattr.h>
+#include <linux/posix_acl.h>
+#include <linux/posix_acl_xattr.h>
 
 #include "ks3fs.h"
 
@@ -327,6 +331,7 @@ void ks3fs_xattr_update(struct inode *inode, char *hdr)
 	set_bit(KS3_I_XATTR_KNOWN, &ki->flags);
 	spin_unlock(&ki->lock);
 	kfree(hdr);
+	forget_all_cached_acls(inode);	/* may have changed remotely */
 }
 
 /* A copy of the stored header value, for an upload or metadata rewrite. */
@@ -369,46 +374,35 @@ static int find(const struct xlist *xl, const char *name)
 	return -1;
 }
 
-static int ks3fs_xattr_get(const struct xattr_handler *h,
-			   struct dentry *unused, struct inode *inode,
-			   const char *name, void *buffer, size_t size)
+/* A copy of xattr @full's value in *@val; returns its length or -errno. */
+static int xattr_get_full(struct inode *inode, const char *full, void **val)
 {
-	char *full = kasprintf(GFP_KERNEL, "%s%s", h->prefix, name);
-	struct xlist *xl;
+	struct xlist *xl = inode_xlist(inode);
 	int i, ret;
 
-	if (!full)
-		return -ENOMEM;
-	xl = inode_xlist(inode);
-	if (IS_ERR(xl)) {
-		kfree(full);
+	*val = NULL;
+	if (IS_ERR(xl))
 		return PTR_ERR(xl);
-	}
 	i = find(xl, full);
 	if (i < 0) {
 		ret = -ENODATA;
 	} else {
 		ret = xl->e[i].len;
-		if (size) {
-			if (size < xl->e[i].len)
-				ret = -ERANGE;
-			else
-				memcpy(buffer, xl->e[i].val, xl->e[i].len);
-		}
+		*val = kmemdup(xl->e[i].val, xl->e[i].len ?: 1, GFP_KERNEL);
+		if (!*val)
+			ret = -ENOMEM;
 	}
 	xlist_free(xl);
-	kfree(full);
 	return ret;
 }
 
-static int ks3fs_xattr_set(const struct xattr_handler *h,
-			   struct mnt_idmap *idmap, struct dentry *unused,
-			   struct inode *inode, const char *name,
-			   const void *value, size_t size, int flags)
+/* Set (or with @value NULL, remove) xattr @full; stored lazily, as chmod. */
+static int xattr_set_full(struct inode *inode, const char *full,
+			  const void *value, size_t size, int flags)
 {
 	struct ks3fs_inode *ki = KS3_I(inode);
 	struct xlist *xl, *nl;
-	char *full, *hdr;
+	char *hdr;
 	int i, err;
 
 	/* the bucket root has no object to keep them on */
@@ -416,14 +410,9 @@ static int ks3fs_xattr_set(const struct xattr_handler *h,
 		return -EOPNOTSUPP;
 	if (size > XATTR_HDR_MAX)
 		return -E2BIG;
-	full = kasprintf(GFP_KERNEL, "%s%s", h->prefix, name);
-	if (!full)
-		return -ENOMEM;
 	xl = inode_xlist(inode);
-	if (IS_ERR(xl)) {
-		kfree(full);
+	if (IS_ERR(xl))
 		return PTR_ERR(xl);
-	}
 	i = find(xl, full);
 	err = -ENODATA;
 	if (i < 0 && (flags & XATTR_REPLACE))
@@ -444,7 +433,7 @@ static int ks3fs_xattr_set(const struct xattr_handler *h,
 		if (strcmp(xl->e[i].name, full))
 			nl->e[nl->n++] = xl->e[i];
 	if (value)
-		nl->e[nl->n++] = (struct xent){ full, (u8 *)value, size };
+		nl->e[nl->n++] = (struct xent){ (char *)full, (u8 *)value, size };
 	hdr = xattr_encode(nl, &err);
 	kfree(nl);
 	if (err)
@@ -459,7 +448,137 @@ static int ks3fs_xattr_set(const struct xattr_handler *h,
 	ks3fs_schedule_meta_writeback(inode);
 out:
 	xlist_free(xl);
+	return err;
+}
+
+static int ks3fs_xattr_get(const struct xattr_handler *h,
+			   struct dentry *unused, struct inode *inode,
+			   const char *name, void *buffer, size_t size)
+{
+	char *full = kasprintf(GFP_KERNEL, "%s%s", h->prefix, name);
+	void *val;
+	int ret;
+
+	if (!full)
+		return -ENOMEM;
+	ret = xattr_get_full(inode, full, &val);
+	if (ret > 0 && size) {
+		if (size < ret)
+			ret = -ERANGE;
+		else
+			memcpy(buffer, val, ret);
+	}
+	kfree(val);
 	kfree(full);
+	return ret;
+}
+
+static int ks3fs_xattr_set(const struct xattr_handler *h,
+			   struct mnt_idmap *idmap, struct dentry *unused,
+			   struct inode *inode, const char *name,
+			   const void *value, size_t size, int flags)
+{
+	char *full = kasprintf(GFP_KERNEL, "%s%s", h->prefix, name);
+	int err;
+
+	if (!full)
+		return -ENOMEM;
+	err = xattr_set_full(inode, full, value, size, flags);
+	kfree(full);
+	return err;
+}
+
+/* ---------- POSIX ACLs ---------- */
+
+struct posix_acl *ks3fs_get_acl(struct inode *inode, int type, bool rcu)
+{
+	struct posix_acl *acl;
+	void *val;
+	int len;
+
+	if (rcu)
+		return ERR_PTR(-ECHILD);	/* may need a HEAD */
+	len = xattr_get_full(inode, posix_acl_xattr_name(type), &val);
+	if (len == -ENODATA)
+		return NULL;
+	if (len < 0)
+		return ERR_PTR(len);
+	acl = posix_acl_from_xattr(&init_user_ns, val, len);
+	kfree(val);
+	return acl;
+}
+
+int ks3fs_set_acl(struct mnt_idmap *idmap, struct dentry *dentry,
+		  struct posix_acl *acl, int type)
+{
+	struct inode *inode = d_inode(dentry);
+	umode_t mode = inode->i_mode;
+	void *val = NULL;
+	size_t len = 0;
+	int err;
+
+	if (type == ACL_TYPE_DEFAULT && !S_ISDIR(inode->i_mode))
+		return acl ? -EACCES : 0;
+	if (type == ACL_TYPE_ACCESS && acl) {
+		/* the mode follows; an ACL the mode alone expresses is dropped */
+		err = posix_acl_update_mode(idmap, inode, &mode, &acl);
+		if (err)
+			return err;
+	}
+	if (acl) {
+		val = ks3_acl_to_xattr(acl, &len);
+		if (!val)
+			return -ENOMEM;
+	}
+	err = xattr_set_full(inode, posix_acl_xattr_name(type), val, len, 0);
+	kfree(val);
+	if (err)
+		return err;
+	if (mode != inode->i_mode) {
+		inode->i_mode = mode;
+		set_bit(KS3_I_META_DIRTY, &KS3_I(inode)->flags);
+		ks3fs_schedule_meta_writeback(inode);
+	}
+	set_cached_acl(inode, type, acl);
+	return 0;
+}
+
+/*
+ * The xattr header for a new object with the ACLs posix_acl_create()
+ * derived for it (NULL if none).  Consumes the ACL references.
+ */
+int ks3fs_acl_header(struct posix_acl *default_acl, struct posix_acl *acl,
+		     char **hdr)
+{
+	struct xlist *xl;
+	int err = 0;
+
+	*hdr = NULL;
+	xl = kzalloc(struct_size(xl, e, 2), GFP_KERNEL);
+	if (!xl) {
+		err = -ENOMEM;
+		goto out;
+	}
+	if (acl) {
+		xl->e[xl->n].name = kstrdup(XATTR_NAME_POSIX_ACL_ACCESS, GFP_KERNEL);
+		xl->e[xl->n].val = ks3_acl_to_xattr(acl, &xl->e[xl->n].len);
+		xl->n++;
+	}
+	if (default_acl) {
+		xl->e[xl->n].name = kstrdup(XATTR_NAME_POSIX_ACL_DEFAULT, GFP_KERNEL);
+		xl->e[xl->n].val = ks3_acl_to_xattr(default_acl,
+						   &xl->e[xl->n].len);
+		xl->n++;
+	}
+	if (xl->n && (!xl->e[0].name || !xl->e[0].val ||
+		      (xl->n > 1 && (!xl->e[1].name || !xl->e[1].val))))
+		err = -ENOMEM;
+	else
+		*hdr = xattr_encode(xl, &err);
+	xlist_free(xl);
+out:
+	posix_acl_release(acl);
+	posix_acl_release(default_acl);
 	return err;
 }
 
@@ -474,7 +593,9 @@ ssize_t ks3fs_listxattr(struct dentry *dentry, char *buf, size_t size)
 		return PTR_ERR(xl);
 	for (i = 0; i < xl->n; i++) {
 		if (strncmp(xl->e[i].name, XATTR_USER_PREFIX,
-			    XATTR_USER_PREFIX_LEN))
+			    XATTR_USER_PREFIX_LEN) &&
+		    strcmp(xl->e[i].name, XATTR_NAME_POSIX_ACL_ACCESS) &&
+		    strcmp(xl->e[i].name, XATTR_NAME_POSIX_ACL_DEFAULT))
 			continue;	/* another namespace (other clients) */
 		n = strlen(xl->e[i].name) + 1;
 		if (size) {

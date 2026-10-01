@@ -254,6 +254,41 @@ check "rename a file with xattrs" mv $M/xfile $M/xfile2
 eq "file xattr survives rename" "$(xa getxattr $M2/xfile2 user.k)" "v"
 eq "no xattrs on the bucket root" "$(xa setxattr $M user.k v)" "Operation not supported"
 
+# ---- POSIX ACLs (system.posix_acl_* in the same header)
+as() { ks3test asuser "$@"; }
+echo secret > $M/acl.txt
+chmod 600 $M/acl.txt
+fails "other users are refused by the mode" as 1000 1000 cat $M/acl.txt
+check "set an access ACL" ks3test setacl $M/acl.txt access "u::rw-,u:1000:r--,g::---,m::r--,o::---"
+eq "the mask shows as group bits" "$(stat -c %a $M/acl.txt)" "640"
+eq "named user may read" "$(as 1000 1000 cat $M/acl.txt)" "secret"
+fails "others still may not" as 1001 1001 cat $M/acl.txt
+sync
+eq "ACL stored" "$(ks3test getacl $M2/acl.txt access)" "u::rw-,u:1000:r--,g::---,m::r--,o::---"
+eq "and enforced through the other mount" "$(as 1000 1000 cat $M2/acl.txt)" "secret"
+check "chmod narrows the mask" chmod 600 $M/acl.txt
+eq "mask after chmod" "$(ks3test getacl $M/acl.txt access)" "u::rw-,u:1000:r--,g::---,m::---,o::---"
+fails "masked entry no longer grants" as 1000 1000 cat $M/acl.txt
+check "an ACL the mode expresses is dropped" ks3test setacl $M/acl.txt access "u::rw-,g::r--,o::---"
+eq "no ACL left" "$(ks3test getacl $M/acl.txt access)" "No data available"
+eq "mode from that ACL" "$(stat -c %a $M/acl.txt)" "640"
+mkdir $M/acldir
+check "set a default ACL" ks3test setacl $M/acldir default "u::rwx,u:1000:rwx,g::r-x,m::rwx,o::---"
+eq "default ACL on files refused" "$(ks3test setacl $M/acl.txt default u::rw-,g::r--,o::---)" "Permission denied"
+umask 022
+echo inherited > $M/acldir/f
+mkdir $M/acldir/sub
+sync
+# the mask is the default's, limited by the create mode (0666)
+eq "new file inherits the default ACL" "$(ks3test getacl $M2/acldir/f access)" "u::rw-,u:1000:rwx,g::r-x,m::rw-,o::---"
+eq "new file mode from it, not the umask" "$(stat -c %a $M2/acldir/f)" "660"
+eq "new directory inherits the default" "$(ks3test getacl $M2/acldir/sub default)" "u::rwx,u:1000:rwx,g::r-x,m::rwx,o::---"
+eq "named user may write in the inheriting directory" "$(as 1000 1000 sh -c "echo hi > $M/acldir/sub/byuser && cat $M/acldir/sub/byuser")" "hi"
+umask 027
+echo masked > $M/umask.txt
+eq "umask applies without a default ACL" "$(stat -c %a $M/umask.txt)" "640"
+umask 022
+
 check "symlink" ln -s hello.txt $M/link
 eq "readlink via other mount" "$(readlink $M2/link)" "hello.txt"
 eq "follow symlink" "$(cat $M2/link)" "hello world"

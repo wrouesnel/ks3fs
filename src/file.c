@@ -25,6 +25,7 @@
 #include <linux/sched/signal.h>
 #include <linux/bvec.h>
 #include <linux/falloc.h>
+#include <linux/posix_acl.h>
 
 #include "ks3fs.h"
 
@@ -1321,6 +1322,12 @@ int ks3fs_setattr(struct mnt_idmap *idmap, struct dentry *dentry,
 		}
 	}
 	setattr_copy(idmap, inode, attr);
+	if (attr->ia_valid & ATTR_MODE) {
+		/* the ACL's group class follows the mode (no-op without ACLs) */
+		err = posix_acl_chmod(idmap, dentry, inode->i_mode);
+		if (err)
+			return err;
+	}
 
 	/*
 	 * Metadata-only changes are stored by ->write_inode (or with the
@@ -1354,6 +1361,8 @@ const struct inode_operations ks3fs_file_iops = {
 	.setattr	= ks3fs_setattr,
 	.getattr	= ks3fs_getattr,
 	.listxattr	= ks3fs_listxattr,
+	.get_inode_acl	= ks3fs_get_acl,
+	.set_acl	= ks3fs_set_acl,
 };
 
 const struct file_operations ks3fs_file_fops = {

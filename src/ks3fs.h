@@ -395,5 +395,10 @@ ssize_t ks3fs_listxattr(struct dentry *dentry, char *buf, size_t size);
 int ks3fs_xattr_load(struct inode *inode);
 void ks3fs_xattr_update(struct inode *inode, char *hdr);
 int ks3fs_xattr_header(struct inode *inode, char **out);
+struct posix_acl *ks3fs_get_acl(struct inode *inode, int type, bool rcu);
+int ks3fs_set_acl(struct mnt_idmap *idmap, struct dentry *dentry,
+		  struct posix_acl *acl, int type);
+int ks3fs_acl_header(struct posix_acl *default_acl, struct posix_acl *acl,
+		     char **hdr);
 
 #endif /* _KS3FS_H */
