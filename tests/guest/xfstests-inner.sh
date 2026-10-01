@@ -18,6 +18,8 @@ CONF
 args=${XFSTESTS_ARGS:--g quick}
 # check wants options before test names
 [ -f /tests/xfstests.exclude ] && args="-E /tests/xfstests.exclude $args"
+[ "${XFSTESTS_SLOW:-0}" = 1 ] || [ ! -f /tests/xfstests.slow ] ||
+	args="-E /tests/xfstests.slow $args"
 echo "# xfstests $args"
 # a test that makes no progress for STALL_SECS gets the kernel's view of
 # every CPU and blocked task dumped to the console (sysrq l and w)

@@ -9,6 +9,8 @@
 #   SUITES=big tests/run.sh           (6 GiB object in a 1 GiB guest; slow)
 #   SUITES=stress tests/run.sh        (xfstests fsx + fsstress)
 #   SUITES=xfstests XFSTESTS_ARGS="-g quick" tests/run.sh
+#                                     (XFSTESTS_SLOW=1 includes the
+#                                     tests in tests/guest/xfstests.slow)
 #                                     (xfstests on an Ubuntu root disk; slow)
 #
 # Needs: qemu-system-x86_64, static busybox, aws CLI, curl, gcc and the
@@ -214,6 +216,7 @@ if has xfstests; then
 	export ROOT_DISK=$ROOT/build/xfstests-rootfs.img
 	export VM_MEM=${VM_MEM:-4096} VM_CPUS=${VM_CPUS:-4} VM_TIMEOUT=${VM_TIMEOUT:-10800}
 	echo "XFSTESTS_ARGS=\"${XFSTESTS_ARGS:--g quick}\"" >>"$ENVF"
+	echo "XFSTESTS_SLOW=${XFSTESTS_SLOW:-0}" >>"$ENVF"
 fi
 if has big; then
 	# prove memory stays bounded: several times more data than guest RAM

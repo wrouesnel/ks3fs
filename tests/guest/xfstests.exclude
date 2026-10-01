@@ -2,7 +2,13 @@
 # Everything else in the quick group must pass or be skipped (_notrun).
 
 # no special files (mknod is EPERM)
+generic/633	# vfstest setgid-create: mknodat
 generic/696	# vfstest setgid-create-umask: mknodat
+generic/697	# vfstest setgid-create-acl: mknodat
 
 # S3 caps user metadata at 2 KiB per object, so only a few xattrs fit
 generic/020	# hundreds of attributes per file
+generic/486	# 64 KiB xattr values
+
+# no free-space accounting: statfs reports a nominal size
+generic/103	# fallocates "all free space"

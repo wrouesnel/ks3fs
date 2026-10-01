@@ -1,0 +1,6 @@
+# xfstests that pass in principle but take hours on ks3fs: fsstress grows
+# files to several GB (each write or truncate past EOF adds up to 1 MiB),
+# and every close stores the whole object again (server-side copies of the
+# unchanged parts).  Skipped unless XFSTESTS_SLOW=1.
+generic/013	# fsstress, 1000 ops x many processes
+generic/070	# fsstress with xattr ops
