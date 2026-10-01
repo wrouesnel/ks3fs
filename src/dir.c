@@ -569,6 +569,90 @@ out:
 	return err;
 }
 
+/*
+ * O_TMPFILE: an inode with no object, its data only in the page cache
+ * (uploads skip unlinked inodes).  A placeholder key under the orphans
+ * directory gives it an inode number; linkat() stores it under a name.
+ */
+static int ks3fs_tmpfile(struct mnt_idmap *idmap, struct inode *dir,
+			 struct file *file, umode_t mode)
+{
+	struct ks3fs_sb_info *sbi = KS3_SB(dir->i_sb);
+	struct ks3fs_attr attr = {};
+	struct ks3fs_meta *meta;
+	struct inode *inode;
+	char *key;
+	int err;
+
+	key = kasprintf(GFP_KERNEL, "%s%s/tmp-%llx", sbi->prefix,
+			KS3FS_ORPHANS, ktime_get_real_ns());
+	if (!key)
+		return -ENOMEM;
+	err = new_meta_acl(dir, S_IFREG | mode, &attr.meta, &meta);
+	if (err)
+		goto out;
+	if (!meta) {
+		/* no metadata: the mount-wide mode, with the usual umask */
+		attr.meta.has_xattr = true;
+	}
+	inode = ks3fs_new_inode(dir->i_sb, key, &attr);
+	if (IS_ERR(inode)) {
+		err = PTR_ERR(inode);
+		goto out;
+	}
+	clear_bit(KS3_I_REMOTE, &KS3_I(inode)->flags);
+	set_bit(KS3_I_TMPFILE, &KS3_I(inode)->flags);
+	d_tmpfile(file, inode);		/* drops the link count to 0 */
+	err = finish_open_simple(file, 0);
+out:
+	ks3fs_meta_release(&attr.meta);
+	kfree(key);
+	return err;
+}
+
+/*
+ * Hard links do not exist in an object store; the one link supported is
+ * giving an O_TMPFILE file its name, which stores it.
+ */
+static int ks3fs_link(struct dentry *old_dentry, struct inode *dir,
+		      struct dentry *dentry)
+{
+	struct inode *inode = d_inode(old_dentry);
+	struct ks3fs_inode *ki = KS3_I(inode);
+	char *key;
+	int err;
+
+	if (inode->i_nlink || !test_bit(KS3_I_TMPFILE, &ki->flags))
+		return -EPERM;
+	key = ks3fs_child_key(dir, &dentry->d_name, false);
+	if (IS_ERR(key))
+		return PTR_ERR(key);
+	spin_lock(&ki->lock);
+	swap(ki->key, key);
+	spin_unlock(&ki->lock);
+	inc_nlink(inode);
+	set_bit(KS3_I_DIRTY, &ki->flags);	/* even if empty: create it */
+	err = ks3fs_upload_locked(inode);	/* the VFS holds the inode lock */
+	if (err) {
+		drop_nlink(inode);
+		spin_lock(&ki->lock);
+		swap(ki->key, key);
+		spin_unlock(&ki->lock);
+		kfree(key);
+		return err;
+	}
+	kfree(key);
+	ks3fs_rehash_ino(inode);
+	clear_bit(KS3_I_TMPFILE, &ki->flags);
+	inode_set_ctime_current(inode);
+	ihold(inode);
+	set_dentry_time(dentry);
+	d_instantiate(dentry, inode);
+	ks3fs_dir_forget_snap(dir);
+	inode_set_mtime_to_ts(dir, inode_set_ctime_current(dir));
+	return 0;
+}
+
 static KS3_MKDIR_RET ks3fs_mkdir(struct mnt_idmap *idmap, struct inode *dir,
 				 struct dentry *dentry, umode_t mode)
 {
@@ -1036,6 +1120,8 @@ const struct dentry_operations ks3fs_dops = {
 const struct inode_operations ks3fs_dir_iops = {
 	.lookup		= ks3fs_lookup,
 	.create		= ks3fs_create,
+	.tmpfile	= ks3fs_tmpfile,
+	.link		= ks3fs_link,
 	.mkdir		= ks3fs_mkdir,
 	.unlink		= ks3fs_unlink,
 	.symlink	= ks3fs_symlink,

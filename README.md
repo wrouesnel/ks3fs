@@ -185,7 +185,8 @@ options:
 - Shared writable `mmap` works, but like other writes the data is stored on
   `msync`/`fsync`, close, or unmap of the last reference; mapped pages written
   to stay in memory until then.
-- No hard links or special files.
+- No hard links or special files. `O_TMPFILE` works, and `linkat()` can give
+  such a file its name (which stores it); that is the only link allowed.
 - User xattrs (`user.*`) and POSIX ACLs are stored the way s3fs-fuse stores
   them (`x-amz-meta-xattr`). S3's 2 KiB metadata limit caps them at about
   1.9 KiB per object, encoded. ACLs need metadata (they are off with
@@ -334,8 +335,7 @@ A weekly schedule picks up new kernel ABIs.
 
 ## Roadmap
 
-1. O_TMPFILE, and `RENAME_EXCHANGE`/`RENAME_WHITEOUT` (overlayfs upper
-   layers).
+1. `RENAME_EXCHANGE`/`RENAME_WHITEOUT` (overlayfs upper layers).
 2. DNS via the `dns_resolver` key type as an alternative to the mount helper.
    Client certificates (mutual TLS) via `tls_client_hello_x509` and the keyring.
 3. Large folios.

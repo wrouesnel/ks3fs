@@ -775,6 +775,8 @@ static void mpu_stream(struct inode *inode, loff_t cursor)
 
 	if (!ki->mpu && size < 2 * part)
 		return;
+	if (!inode->i_nlink)
+		return;	/* unlinked or O_TMPFILE: nothing is stored */
 	for (k = ki->stream_next; k < k_end && !err; k++) {
 		loff_t start = (loff_t)k * part, end = start + part;
 

@@ -30,6 +30,9 @@
  *                           print the ACL in the same form
  *   ks3test asuser UID GID CMD [ARGS...]
  *                           run CMD with those ids (no supplementary groups)
+ *   ks3test tmpfile DIR NAME DATA
+ *                           open(DIR, O_TMPFILE, 0640), write DATA, and give
+ *                           it NAME with linkat() (NAME "-": stay unnamed)
  */
 #define _GNU_SOURCE
 #include <errno.h>
@@ -315,6 +318,26 @@ static int getacl(const char *path, const char *which)
 	return 0;
 }
 
+static int do_tmpfile(const char *dir, const char *name, const char *data)
+{
+	char proc[64], path[4096];
+	int fd = open(dir, O_TMPFILE | O_RDWR, 0640);
+
+	if (fd < 0 || write(fd, data, strlen(data)) != (ssize_t)strlen(data)) {
+		printf("%s\n", strerror(errno));
+		return 1;
+	}
+	if (strcmp(name, "-")) {
+		snprintf(proc, sizeof(proc), "/proc/self/fd/%d", fd);
+		snprintf(path, sizeof(path), "%s/%s", dir, name);
+		if (linkat(AT_FDCWD, proc, AT_FDCWD, path, AT_SYMLINK_FOLLOW)) {
+			printf("%s\n", strerror(errno));
+			return 1;
+		}
+	}
+	return close(fd) ? 1 : 0;
+}
+
 static int asuser(char **argv)
 {
 	gid_t gid = strtoul(argv[3], NULL, 10);
@@ -374,6 +397,8 @@ int main(int argc, char **argv)
 		return setacl(argv[2], argv[3], argv[4]);
 	if (argc == 4 && !strcmp(argv[1], "getacl"))
 		return getacl(argv[2], argv[3]);
+	if (argc == 5 && !strcmp(argv[1], "tmpfile"))
+		return do_tmpfile(argv[2], argv[3], argv[4]);
 	if (argc >= 5 && !strcmp(argv[1], "asuser"))
 		return asuser(argv);
 	if ((argc == 3 || argc == 4) && !strcmp(argv[1], "pattern"))
@@ -385,6 +410,6 @@ int main(int argc, char **argv)
 		"       setxattr FILE NAME VALUE|- [create|replace] |\n"
 		"       getxattr FILE NAME | listxattr FILE |\n"
 		"       setacl FILE access|default SPEC | getacl FILE access|default |\n"
-		"       asuser UID GID CMD [ARGS...]\n");
+		"       asuser UID GID CMD [ARGS...] | tmpfile DIR NAME|- DATA\n");
 	return 2;
 }

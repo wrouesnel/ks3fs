@@ -303,6 +303,11 @@ eq "symlink owner stored" "$(stat -c '%u %g' $M2/link)" "42 43"
 check "unlink symlink" rm $M/dangling
 fails "symlink gone" test -L $M2/dangling
 fails "hardlink is refused" ln $M/hello.txt $M/hard
+check "O_TMPFILE given a name with linkat" ks3test tmpfile $M tmpfile.txt "made in the dark"
+eq "linked tmpfile stored" "$(cat $M2/tmpfile.txt)" "made in the dark"
+eq "linked tmpfile mode" "$(stat -c %a $M2/tmpfile.txt)" "640"
+check "unnamed O_TMPFILE" ks3test tmpfile $M - "never stored"
+fails "a linked file cannot be linked again" ln $M/tmpfile.txt $M/tmpfile2.txt
 fails "mknod is refused" mknod $M/fifo p
 
 # ---- ls -l on a fresh mount: attributes prefetched in parallel

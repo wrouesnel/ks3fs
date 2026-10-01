@@ -100,6 +100,7 @@ enum {
 	KS3_I_META_DIRTY,	/* mode/owner/times not yet stored */
 	KS3_I_ORPHAN,		/* unlinked while open: object moved aside */
 	KS3_I_XATTR_KNOWN,	/* @xattr reflects the object's headers */
+	KS3_I_TMPFILE,		/* O_TMPFILE not linked yet: no object */
 };
 
 struct ks3fs_inode {
