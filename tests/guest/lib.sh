@@ -12,3 +12,4 @@ eq()     { if [ "$2" = "$3" ]; then ok "$1"; else not_ok "$1: got '$2' want '$3'
 sha()    { sha256sum "$1" | cut -d' ' -f1; }
 drop_caches() { sync; echo 3 > /proc/sys/vm/drop_caches; }
 finish() { echo "# $SUITE: $PASS passed, $FAIL failed"; [ "$FAIL" -eq 0 ]; }
+now_ms() { awk '{printf "%d", $1 * 1000}' /proc/uptime; }

@@ -221,7 +221,7 @@ static int ks3fs_read_folio(struct file *file, struct folio *folio)
  * done, marks them uptodate and unlocks them, so a killed reader can never
  * unlock folios that are still being filled.
  */
-#define RA_CHUNK_MIN	(1 << 20)
+#define RA_CHUNK_MIN	(256 << 10)	/* up to 16 requests per 4 MiB window */
 
 struct ra_job {
 	struct inode *inode;

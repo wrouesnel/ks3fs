@@ -10,7 +10,9 @@ M2=/mnt/f2
 M3=/mnt/f3
 mkdir -p $M $M2 $M3
 CREDS="access_key=$S3_AK,secret_key=$S3_SK"
-P="addr=10.0.2.2,port=$FP_PLAIN,$CREDS,timeout=3"
+# parallel=1: these scenarios rely on one connection carrying the transfer
+# (parallel readahead gets its own disconnect test below)
+P="addr=10.0.2.2,port=$FP_PLAIN,$CREDS,timeout=3,parallel=1"
 
 check "mount via fault proxy" mount -t ks3fs -o $P,retry_timeout=60 ks3test $M
 ctl "set?mode=normal"
@@ -28,7 +30,9 @@ c0=$(cuts)
 ctl "cut?dir=up&bytes=2000000&count=2"
 check "upload survives 2 mid-body disconnects" cp /tmp/up.bin $M/faults-up.bin
 c1=$(cuts)
-check "the proxy really cut uploads ($c0 -> $c1)" test "$c1" -ge $((c0 + 2))
+# budgets go to idle keep-alive connections first, which the upload may not
+# reuse: insist only that at least one upload connection really was cut
+check "the proxy really cut uploads ($c0 -> $c1)" test "$c1" -ge $((c0 + 1))
 drop_caches
 eq "uploaded data intact" "$(sha $M/faults-up.bin)" "$(sha /tmp/up.bin)"
 
@@ -104,34 +108,44 @@ check "signals were delivered during the read" grep -q "signals" /tmp/sig.err
 sed 's/^/#   /' /tmp/sig.err
 ctl "slow?bps=0"
 
+# ---- parallel readahead: chunks cut mid-transfer are refetched
+c0=$(cuts)
+mount -t ks3fs -o $P,parallel=16 ks3test $M3
+ctl "cut?dir=down&bytes=150000&count=10"
+drop_caches
+eq "parallel readahead survives disconnects" "$(sha $M3/big.bin)" "$BIG_SHA"
+c1=$(cuts)
+check "the proxy really cut parallel reads ($c0 -> $c1)" test "$c1" -ge $((c0 + 1))
+umount $M3
+
 # ---- latency: ls -l issues its HEADs in parallel
 mkdir -p $M/lat
 for i in $(seq 1 200); do : > $M/lat/f$i; done
 ctl "delay?ms=20"
 for par in 16 1; do
 	mount -t ks3fs -o $P,parallel=$par ks3test $M3
-	t0=$(date +%s)
+	t0=$(now_ms)
 	n=$(ls -l $M3/lat | grep -c '^-')
-	eval "lat_$par=$(( $(date +%s) - t0 ))"
+	eval "lat_$par=$(( $(now_ms) - t0 ))"
 	umount $M3
-	echo "#   ls -l of 200 files at 20ms latency, parallel=$par: $(eval echo \$lat_$par)s ($n files)"
+	echo "#   ls -l of 200 files at 20ms latency, parallel=$par: $(eval echo \$lat_$par)ms ($n files)"
 done
 check "parallel prefetch is at least 3x faster" test $(( lat_16 * 3 )) -le "$lat_1"
 # sequential reads: readahead windows are fetched as parallel ranged GETs
 for par in 16 1; do
 	mount -t ks3fs -o $P,parallel=$par ks3test $M3
-	t0=$(date +%s)
+	t0=$(now_ms)
 	s=$(sha $M3/big.bin)
-	eval "rd_$par=$(( $(date +%s) - t0 ))"
+	eval "rd_$par=$(( $(now_ms) - t0 ))"
 	umount $M3
-	echo "#   20 MB read at 20ms latency, parallel=$par: $(eval echo \$rd_$par)s"
+	echo "#   20 MB read at 20ms latency, parallel=$par: $(eval echo \$rd_$par)ms"
 	eq "parallel=$par read content" "$s" "$BIG_SHA"
 done
 ctl "delay?ms=0"
 check "parallel readahead is at least 3x faster" test $(( rd_16 * 3 )) -le "$rd_1"
 
 # ---- faults over TLS
-check "TLS mount via fault proxy" sh -c "umount $M2 && mount -t ks3fs -o addr=10.0.2.2,port=$FP_TLS,$CREDS,host=s3.ks3fs.test,tls,timeout=3 ks3test $M2"
+check "TLS mount via fault proxy" sh -c "umount $M2 && mount -t ks3fs -o addr=10.0.2.2,port=$FP_TLS,$CREDS,host=s3.ks3fs.test,tls,timeout=3,parallel=1 ks3test $M2"
 c0=$(cuts)
 ctl "cut?dir=down&bytes=3000000&count=3&port=$FP_TLS"
 drop_caches
