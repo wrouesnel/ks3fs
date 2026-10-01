@@ -53,11 +53,14 @@ fi
 
 # any kernel splat is a failure even if the tests passed
 SPLAT='BUG: |WARNING: |Oops|KASAN: |UBSAN: |possible circular locking|possible recursive locking|inconsistent lock state|suspicious RCU usage|list_add corruption|list_del corruption|general protection fault|INFO: task .* blocked'
-if dmesg | grep -E "$SPLAT" >/dev/null; then
+# CPU vulnerability notices at boot ("Speculative Return Stack Overflow:
+# WARNING: See .../hw-vuln/srso.html", on AMD hosts) are not splats
+klog() { dmesg | grep -v 'admin-guide/hw-vuln'; }
+if klog | grep -E "$SPLAT" >/dev/null; then
 	echo "=== kernel log shows problems:"
-	dmesg | grep -E "$SPLAT" | head -20
+	klog | grep -E "$SPLAT" | head -20
 	echo "=== context:"
-	dmesg | grep -E -A40 "$SPLAT" | head -150
+	klog | grep -E -A40 "$SPLAT" | head -150
 	rc=1
 fi
 if [ -n "$KS3_UNLOAD" ]; then

@@ -44,6 +44,9 @@ start_versitygw() {
 	wait_http
 }
 
+# RGW_NAME becomes rgw_dns_name: without it the demo takes any Host that is
+# not its hostname or an IP (s3.ks3fs.test, used for TLS) as a virtual-host
+# bucket name, and every TLS request fails with NoSuchBucket
 start_rgw() {
 	local engine
 	engine=$(command -v docker || command -v podman)
@@ -54,6 +57,7 @@ start_rgw() {
 		-e CEPH_DEMO_UID=ks3 -e CEPH_DEMO_ACCESS_KEY="$AK" \
 		-e CEPH_DEMO_SECRET_KEY="$SK" -e RGW_FRONTEND_PORT="$PORT" \
 		-e DEMO_DAEMONS="osd rgw" \
+		-e RGW_NAME=s3.ks3fs.test \
 		"${RGW_IMAGE:-quay.io/ceph/demo:latest}" demo >/dev/null
 	SERVER_STOP="$engine logs $RGW_NAME >$OUT/server.log 2>&1; $engine rm -f $RGW_NAME >/dev/null"
 	wait_http 2 150

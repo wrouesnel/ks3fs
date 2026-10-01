@@ -24,6 +24,7 @@ drop_caches
 eq "read survives 4 mid-body disconnects" "$(sha $M/big.bin)" "$BIG_SHA"
 c1=$(cuts)
 check "the proxy really cut connections ($c0 -> $c1)" test "$c1" -ge $((c0 + 4))
+ctl uncut	# budgets not used must not cut later tests
 
 dd if=/dev/urandom of=/tmp/up.bin bs=1M count=8 2>/dev/null
 c0=$(cuts)
@@ -33,6 +34,7 @@ c1=$(cuts)
 # budgets go to idle keep-alive connections first, which the upload may not
 # reuse: insist only that at least one upload connection really was cut
 check "the proxy really cut uploads ($c0 -> $c1)" test "$c1" -ge $((c0 + 1))
+ctl uncut	# budgets not used must not cut later tests
 drop_caches
 eq "uploaded data intact" "$(sha $M/faults-up.bin)" "$(sha /tmp/up.bin)"
 
@@ -116,6 +118,7 @@ drop_caches
 eq "parallel readahead survives disconnects" "$(sha $M3/big.bin)" "$BIG_SHA"
 c1=$(cuts)
 check "the proxy really cut parallel reads ($c0 -> $c1)" test "$c1" -ge $((c0 + 1))
+ctl uncut	# budgets not used must not cut later tests
 umount $M3
 
 # ---- latency: ls -l issues its HEADs in parallel
@@ -152,6 +155,7 @@ drop_caches
 eq "TLS read survives mid-record disconnects" "$(sha $M2/big.bin)" "$BIG_SHA"
 c1=$(cuts)
 check "the proxy really cut TLS connections ($c0 -> $c1)" test "$c1" -ge $((c0 + 3))
+ctl uncut	# budgets not used must not cut later tests
 
 check "umount all" sh -c "umount $M && umount $M2 && umount $M3"
 finish

@@ -12,7 +12,11 @@ with busybox wget:
   GET /set?mode=refuse            stop listening (connection refused)
   GET /cut?dir=down&bytes=N&count=K[&port=P]
                                   kill each of the next K connections after
-                                  N bytes server->client (dir=up: client->server)
+                                  N bytes server->client (dir=up: client->server);
+                                  a connection that closes before N bytes hands
+                                  its budget on (servers that close after every
+                                  response, like versitygw, still get K cuts)
+  GET /uncut                      drop the cut budgets not used yet
   GET /slow?bps=N                 throttle server->client to N bytes/s (0=off)
   GET /delay?ms=N                 add N ms before each server->client read
   GET /stats                      JSON counters
@@ -30,9 +34,10 @@ import sys
 import urllib.parse
 
 state = {"mode": "normal", "bps": 0, "delay": 0.0}
-cuts = {"down": [], "up": []}     # queued (bytes) budgets for new connections
+cuts = {"down": [], "up": []}     # queued (bytes, port) budgets for new connections
 stats = {"conns": 0, "resets": 0, "cuts": 0, "bytes_down": 0, "bytes_up": 0}
-active = {}                       # conn -> {"down": [budget]|None, "up": ...}
+active = {}                       # conn -> {"down": budget|None, "up": ...}
+# a budget is [bytes left, bytes, port or None, fired]
 servers = []
 
 
@@ -67,6 +72,7 @@ async def pump(reader, writer, direction, conn):
                     if data:
                         writer.write(data)
                         await writer.drain()
+                    budget[3] = True
                     stats["cuts"] += 1
                     raise ConnectionAbortedError("cut")
                 budget[0] -= len(data)
@@ -109,14 +115,19 @@ async def handle(creader, cwriter, upstream, lport):
     def take(d):
         for i, (n, port) in enumerate(cuts[d]):
             if port in (None, lport):
-                return [cuts[d].pop(i)[0]]
+                cuts[d].pop(i)
+                return [n, n, port, False]
         return None
     active[conn] = {"down": take("down"), "up": take("up"), "port": lport}
     try:
         await asyncio.gather(pump(sreader, cwriter, "down", conn),
                              pump(creader, swriter, "up", conn))
     finally:
-        active.pop(conn, None)
+        budgets = active.pop(conn, None) or {}
+        for d in ("down", "up"):
+            b = budgets.get(d)
+            if b and not b[3]:      # never reached: the next connection gets it
+                cuts[d].insert(0, (b[1], b[2]))
 
 
 async def start_listeners(listen, upstream):
@@ -161,9 +172,14 @@ async def control(reader, writer, listen, upstream):
             port = int(q["port"]) if "port" in q else None
             for budgets in active.values():
                 if k and budgets[d] is None and port in (None, budgets["port"]):
-                    budgets[d] = [n]
+                    budgets[d] = [n, n, port, False]
                     k -= 1
             cuts[d] += [(n, port)] * k
+        elif url.path == "/uncut":
+            cuts["down"].clear()
+            cuts["up"].clear()
+            for budgets in active.values():
+                budgets["down"] = budgets["up"] = None
         elif url.path == "/delay":
             state["delay"] = int(q.get("ms", 0)) / 1000.0
         elif url.path == "/slow":

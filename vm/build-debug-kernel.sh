@@ -24,7 +24,8 @@ fi
 mkdir -p "$OBJ"
 if [ ! -f "$OBJ/.config" ]; then
 	# start from Ubuntu's generic config so behaviour matches the shipped kernel
-	base=$(ls -d "$ROOT"/build/kernels/6.8.0-*-generic/headers/usr/src/linux-headers-*-generic 2>/dev/null | sort -V | tail -1)
+	# none fetched yet (a fresh CI runner): fetch the newest 6.8 below
+	base=$(ls -d "$ROOT"/build/kernels/6.8.0-*-generic/headers/usr/src/linux-headers-*-generic 2>/dev/null | sort -V | tail -1 || true)
 	[ -n "$base" ] || { "$ROOT/vm/fetch-kernel.sh" "$("$ROOT/tests/resolve-kernels.sh" | grep '^6\.8\.' | tail -1)" --headers >/dev/null;
 		base=$(ls -d "$ROOT"/build/kernels/6.8.0-*-generic/headers/usr/src/linux-headers-*-generic | sort -V | tail -1); }
 	cp "$base/.config" "$OBJ/.config"
