@@ -14,6 +14,26 @@ CREDS="access_key=$S3_AK,secret_key=$S3_SK"
 # (parallel readahead gets its own disconnect test below)
 P="addr=10.0.2.2,port=$FP_PLAIN,$CREDS,timeout=3,parallel=1"
 
+# a reference copy, read straight from the server, to tell how a read that
+# went wrong differs (short? which bytes?)
+mkdir -p /mnt/fref
+mount -t ks3fs -o addr=10.0.2.2,port=$S3_PORT,$CREDS ks3test /mnt/fref &&
+	cp /mnt/fref/big.bin /tmp/big.ref && umount /mnt/fref
+eq "reference copy of big.bin" "$(sha /tmp/big.ref)" "$BIG_SHA"
+bigsha() {	# sha of a read of $1; details on stderr if it is wrong
+	cat "$1" >/tmp/big.got 2>/tmp/big.err
+	rc=$?
+	s=$(sha /tmp/big.got)
+	if [ "$s" != "$BIG_SHA" ]; then
+		echo "#   $1: cat exit $rc, $(stat -c %s /tmp/big.got) of $(stat -c %s /tmp/big.ref) bytes $(head -c 200 /tmp/big.err)" >&2
+		cmp /tmp/big.ref /tmp/big.got 2>&1 | head -2 | sed 's/^/#   /' >&2
+		echo "#   differing bytes: $(cmp -l /tmp/big.ref /tmp/big.got 2>/dev/null | wc -l)" >&2
+		dmesg | grep ks3fs: | tail -8 | sed 's/^/#   /' >&2
+	fi
+	rm -f /tmp/big.got
+	echo "$s"
+}
+
 check "mount via fault proxy" mount -t ks3fs -o $P,retry_timeout=60 ks3test $M
 ctl "set?mode=normal"
 
@@ -21,7 +41,7 @@ ctl "set?mode=normal"
 c0=$(cuts)
 ctl "cut?dir=down&bytes=3000000&count=4"
 drop_caches
-eq "read survives 4 mid-body disconnects" "$(sha $M/big.bin)" "$BIG_SHA"
+eq "read survives 4 mid-body disconnects" "$(bigsha $M/big.bin)" "$BIG_SHA"
 c1=$(cuts)
 check "the proxy really cut connections ($c0 -> $c1)" test "$c1" -ge $((c0 + 4))
 ctl uncut	# budgets not used must not cut later tests
@@ -42,7 +62,7 @@ eq "uploaded data intact" "$(sha $M/faults-up.bin)" "$(sha /tmp/up.bin)"
 drop_caches
 ( sleep 0.3; ctl "set?mode=reset"; sleep 3; ctl "set?mode=normal" ) &
 ctl "slow?bps=4000000"
-eq "read through a reset storm" "$(sha $M/big.bin)" "$BIG_SHA"
+eq "read through a reset storm" "$(bigsha $M/big.bin)" "$BIG_SHA"
 ctl "slow?bps=0"
 wait
 
@@ -51,7 +71,7 @@ drop_caches
 ctl "slow?bps=4000000"
 ( sleep 1; ctl "set?mode=blackhole"; sleep 8; ctl "set?mode=normal" ) &
 t0=$(date +%s)
-eq "read through an 8s black hole" "$(sha $M/big.bin)" "$BIG_SHA"
+eq "read through an 8s black hole" "$(bigsha $M/big.bin)" "$BIG_SHA"
 check "and it really waited it out ($(elapsed)s)" test "$(elapsed)" -ge 8
 ctl "slow?bps=0"
 wait
@@ -115,7 +135,7 @@ c0=$(cuts)
 mount -t ks3fs -o $P,parallel=16 ks3test $M3
 ctl "cut?dir=down&bytes=150000&count=10"
 drop_caches
-eq "parallel readahead survives disconnects" "$(sha $M3/big.bin)" "$BIG_SHA"
+eq "parallel readahead survives disconnects" "$(bigsha $M3/big.bin)" "$BIG_SHA"
 c1=$(cuts)
 check "the proxy really cut parallel reads ($c0 -> $c1)" test "$c1" -ge $((c0 + 1))
 ctl uncut	# budgets not used must not cut later tests
@@ -152,7 +172,7 @@ check "TLS mount via fault proxy" sh -c "umount $M2 && mount -t ks3fs -o addr=10
 c0=$(cuts)
 ctl "cut?dir=down&bytes=3000000&count=3&port=$FP_TLS"
 drop_caches
-eq "TLS read survives mid-record disconnects" "$(sha $M2/big.bin)" "$BIG_SHA"
+eq "TLS read survives mid-record disconnects" "$(bigsha $M2/big.bin)" "$BIG_SHA"
 c1=$(cuts)
 check "the proxy really cut TLS connections ($c0 -> $c1)" test "$c1" -ge $((c0 + 3))
 ctl uncut	# budgets not used must not cut later tests
