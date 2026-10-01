@@ -1,0 +1,99 @@
+#!/bin/sh
+# mount(8) helper for ks3fs.  The kernel only takes an IP literal, so this
+#   - resolves  endpoint=HOST[:PORT]  into addr=,port=,host=
+#   - reads     credentials=FILE      (access_key=/secret_key=/session_token=
+#                                      or aws_access_key_id= style lines)
+# and passes every other option through unchanged.
+#
+#   mount -t ks3fs -o endpoint=https://s3.amazonaws.com,vhost,region=eu-west-1 nix-releases /mnt
+#   fstab: mybucket/prefix /data ks3fs endpoint=minio.lan:9000,credentials=/etc/ks3fs/creds 0 0
+set -eu
+MOUNT=${KS3FS_MOUNT:-mount}
+
+[ $# -ge 2 ] || { echo "usage: mount.ks3fs bucket[/prefix] dir [-o options]" >&2; exit 1; }
+src=$1 dir=$2
+shift 2
+opts='' extra=''
+while [ $# -gt 0 ]; do
+	case $1 in
+	-o) opts=$2; shift 2 ;;
+	-o*) opts=${1#-o}; shift ;;
+	-t) shift 2 ;;			# our own type
+	-N) extra="$extra -N $2"; shift 2 ;;
+	-[sfnvr]*) case $1 in *r*) extra="$extra -r";; esac
+		   case $1 in *n*) extra="$extra -n";; esac
+		   case $1 in *v*) extra="$extra -v";; esac
+		   case $1 in *f*) extra="$extra -f";; esac
+		   shift ;;
+	*) echo "mount.ks3fs: unexpected argument $1" >&2; exit 1 ;;
+	esac
+done
+
+out='' endpoint='' creds='' have_addr='' have_host='' have_port='' vhost=''
+IFS=,
+for o in $opts; do
+	case $o in
+	endpoint=*) endpoint=${o#endpoint=} ;;
+	credentials=*) creds=${o#credentials=} ;;
+	addr=*) have_addr=1; out="$out,$o" ;;
+	host=*) have_host=1; out="$out,$o" ;;
+	port=*) have_port=1; out="$out,$o" ;;
+	vhost) vhost=1; out="$out,$o" ;;
+	*) out="$out,$o" ;;
+	esac
+done
+unset IFS
+
+if [ -n "$endpoint" ]; then
+	case $endpoint in https://*) out="$out,tls" ;; esac
+	endpoint=${endpoint#http://}
+	endpoint=${endpoint#https://}
+	endpoint=${endpoint%%/*}
+	case $endpoint in
+	\[*\]:*) h=${endpoint%]:*}; h=${h#[}; p=${endpoint##*]:} ;;
+	\[*\])   h=${endpoint#[}; h=${h%]}; p= ;;
+	*:*:*)   h=$endpoint; p= ;;		# bare IPv6
+	*:*)     h=${endpoint%:*}; p=${endpoint##*:} ;;
+	*)       h=$endpoint; p= ;;
+	esac
+	if [ -z "$have_addr" ]; then
+		# virtual-hosted buckets resolve to their own (regional) endpoint
+		rh=$h
+		[ -n "$vhost" ] && rh=${src%%/*}.$h
+		ip=$(getent ahostsv4 "$rh" 2>/dev/null | awk '{print $1; exit}')
+		[ -n "$ip" ] || ip=$(getent ahostsv6 "$rh" 2>/dev/null | awk '{print $1; exit}')
+		[ -n "$ip" ] || { echo "mount.ks3fs: cannot resolve $rh" >&2; exit 1; }
+		out="$out,addr=$ip"
+	fi
+	[ -n "$p" ] && [ -z "$have_port" ] && out="$out,port=$p"
+	case $h in *:*) hh="[$h]" ;; *) hh=$h ;; esac
+	[ -z "$have_host" ] && out="$out,host=$hh${p:+:$p}"
+fi
+
+if [ -n "$creds" ]; then
+	[ -r "$creds" ] || { echo "mount.ks3fs: cannot read $creds" >&2; exit 1; }
+	ak='' sk='' tok=''
+	while IFS='=' read -r k v; do
+		k=$(echo "$k" | tr -d ' \t') v=$(echo "$v" | sed 's/^[ \t]*//;s/[ \t]*$//')
+		case $k in
+		access_key|aws_access_key_id) ak=$v ;;
+		secret_key|aws_secret_access_key) sk=$v ;;
+		session_token|aws_session_token) tok=$v ;;
+		esac
+	done < "$creds"
+	if command -v keyctl >/dev/null && [ "${KS3FS_KEYRING:-1}" = 1 ]; then
+		# keep the secret out of mount options and /proc: a "logon" key
+		# (unreadable from user space) in the user keyring, which the
+		# kernel re-reads per request, so updating the file and
+		# remounting, or "keyctl padd logon ks3fs:NAME @u", rotates it
+		name=${KS3FS_KEY_NAME:-$(echo "$src" | tr '/' '_')}
+		printf '%s\n%s%s' "$ak" "$sk" "${tok:+
+$tok}" | keyctl padd logon "ks3fs:$name" @u >/dev/null
+		out="$out,creds_key=$name"
+	else
+		out="$out,access_key=$ak,secret_key=$sk${tok:+,session_token=$tok}"
+	fi
+fi
+
+# shellcheck disable=SC2086
+exec $MOUNT -i $extra -t ks3fs -o "${out#,}" "$src" "$dir"

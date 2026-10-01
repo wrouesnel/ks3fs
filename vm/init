@@ -1,0 +1,71 @@
+#!/bin/sh
+# PID 1 inside the test VM.  Loads ks3fs, runs the guest test suites and
+# powers off.  The host looks for the KS3FS-RESULT line on the console.
+/bin/busybox --install -s /bin
+export PATH=/bin:/sbin
+mount -t proc proc /proc
+mount -t sysfs sys /sys
+mount -t devtmpfs dev /dev 2>/dev/null
+mount -t tmpfs tmp /tmp
+mkdir -p /dev/pts && mount -t devpts devpts /dev/pts	# nix builds want a pty
+mkdir -p /mnt
+echo 1 > /proc/sys/kernel/panic_on_warn 2>/dev/null
+
+ip link set lo up
+ip link set eth0 up
+ip addr add 10.0.2.15/24 dev eth0
+ip route add default via 10.0.2.2
+
+set -a
+echo; echo "guest kernel: $(uname -r)"
+. /etc/ks3fs-test.env
+set +a
+# kTLS (modular in Ubuntu kernels) and the TLS handshake agent
+[ -f /tls.ko ] && insmod /tls.ko
+if [ -x /usr/sbin/tlshd ]; then
+	/usr/sbin/tlshd -s >/tmp/tlshd.log 2>&1 &
+	echo $! >/tmp/tlshd.pid
+fi
+
+rc=0
+if ! insmod /ks3fs.ko; then
+	echo "insmod failed"
+	rc=1
+else
+	for suite in $KS3_SUITES; do
+		echo "=== suite: $suite"
+		sh "/tests/$suite.sh" || rc=1
+	done
+fi
+
+# kmemleak (debug kernels): any leak with ks3fs in its backtrace fails
+if mount -t debugfs none /sys/kernel/debug 2>/dev/null && [ -w /sys/kernel/debug/kmemleak ]; then
+	echo scan > /sys/kernel/debug/kmemleak; sleep 6
+	echo scan > /sys/kernel/debug/kmemleak
+	if grep -q ks3fs /sys/kernel/debug/kmemleak; then
+		echo "=== kmemleak reports leaks in ks3fs:"
+		cat /sys/kernel/debug/kmemleak | head -120
+		rc=1
+	else
+		echo "kmemleak: no ks3fs leaks"
+	fi
+fi
+
+# any kernel splat is a failure even if the tests passed
+SPLAT='BUG: |WARNING: |Oops|KASAN: |UBSAN: |possible circular locking|possible recursive locking|inconsistent lock state|suspicious RCU usage|list_add corruption|list_del corruption|general protection fault|INFO: task .* blocked'
+if dmesg | grep -E "$SPLAT" >/dev/null; then
+	echo "=== kernel log shows problems:"
+	dmesg | grep -E "$SPLAT" | head -20
+	echo "=== context:"
+	dmesg | grep -E -A40 "$SPLAT" | head -150
+	rc=1
+fi
+if [ -n "$KS3_UNLOAD" ]; then
+	grep ks3fs /proc/mounts | while read -r _ mp _; do umount "$mp"; done
+	rmmod ks3fs || rc=1
+fi
+dmesg | grep -i ks3fs | tail -40
+[ -s /tmp/tlshd.log ] && { echo "=== tlshd log (tail)"; tail -${TLSHD_LOG_LINES:-20} /tmp/tlshd.log; }
+echo "KS3FS-RESULT: $rc"
+sync
+poweroff -f

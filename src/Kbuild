@@ -1,0 +1,3 @@
+obj-m += ks3fs.o
+ks3fs-y := super.o dir.o file.o s3.o http.o tls.o sigv4.o xml.o meta.o mpu.o par.o creds.o
+ccflags-y += -Wall

@@ -1,0 +1,310 @@
+name: ci
+
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+  schedule:
+    # weekly: "-latest" entries in tests/kernels.txt pick up new Ubuntu kernels
+    - cron: "17 3 * * 1"
+
+permissions:
+  contents: read
+
+env:
+  VERSITYGW_VERSION: v1.8.0
+  MINIO_TAG: RELEASE.2025-10-15T17-29-55Z
+
+jobs:
+  kernels:
+    runs-on: ubuntu-24.04
+    outputs:
+      matrix: ${{ steps.resolve.outputs.matrix }}
+    steps:
+      - uses: actions/checkout@v4
+      - id: resolve
+        run: |
+          sudo apt-get update -qq
+          echo "matrix=$(tests/resolve-kernels.sh --json)" >> "$GITHUB_OUTPUT"
+          tests/resolve-kernels.sh >> "$GITHUB_STEP_SUMMARY"
+
+  lint:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - run: shellcheck -S warning vm/*.sh tests/*.sh packaging/*.sh tools/*.sh tools/mount.ks3fs
+
+  build:
+    needs: kernels
+    runs-on: ubuntu-24.04
+    strategy:
+      fail-fast: false
+      matrix:
+        kver: ${{ fromJSON(needs.kernels.outputs.matrix) }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/cache@v4
+        with:
+          path: build/kernels/${{ matrix.kver }}
+          key: kernel-${{ matrix.kver }}
+      - name: Build against ${{ matrix.kver }} headers (warnings are errors)
+        run: |
+          sudo apt-get update -qq
+          KDIR=$(vm/fetch-kernel.sh ${{ matrix.kver }} --headers)/headers/usr/src/linux-headers-${{ matrix.kver }}
+          CC=$(sed -n 's/^CONFIG_CC_VERSION_TEXT="\([^ ]*\) .*/\1/p' "$KDIR/.config")
+          command -v "$CC" || sudo apt-get install -y -qq "${CC#x86_64-linux-gnu-}"
+          make -C src KDIR="$KDIR" CC="$CC" 2>&1 | tee build.log
+          ! grep "warning:" build.log | grep -vE "compiler differs|pahole version differs"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ks3fs-${{ matrix.kver }}
+          path: src/ks3fs.ko
+
+  vm-test:
+    needs: [kernels, build]
+    runs-on: ubuntu-24.04
+    timeout-minutes: 40
+    strategy:
+      fail-fast: false
+      matrix:
+        kver: ${{ fromJSON(needs.kernels.outputs.matrix) }}
+        server: [minio, versitygw, rgw]
+    steps:
+      - uses: actions/checkout@v4
+      - name: Enable KVM
+        run: |
+          echo 'KERNEL=="kvm", GROUP="kvm", MODE="0666", OPTIONS+="static_node=kvm"' |
+            sudo tee /etc/udev/rules.d/99-kvm.rules
+          sudo udevadm control --reload-rules
+          sudo udevadm trigger --name-match=kvm
+          ls -l /dev/kvm
+      - name: Install test dependencies
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq qemu-system-x86 busybox-static cpio \
+            libnl-genl-3-200 libkeyutils1 zstd
+      - uses: actions/cache@v4
+        with:
+          path: build/kernels/${{ matrix.kver }}
+          key: kernel-${{ matrix.kver }}
+      - uses: actions/setup-go@v5
+        if: matrix.server == 'minio'
+        with:
+          go-version: "1.24"
+          cache: false
+      - uses: actions/cache@v4
+        if: matrix.server == 'minio'
+        with:
+          path: build/tools/minio
+          key: minio-${{ env.MINIO_TAG }}
+      - name: Get ${{ matrix.server }}
+        run: |
+          mkdir -p build/tools
+          if [ "${{ matrix.server }}" = minio ]; then
+            tools/build-minio.sh
+          else
+            curl -fsSL "https://github.com/versity/versitygw/releases/download/$VERSITYGW_VERSION/versitygw_${VERSITYGW_VERSION}_Linux_x86_64.tar.gz" |
+              tar xz --strip-components=1 -C build/tools "versitygw_${VERSITYGW_VERSION}_Linux_x86_64/versitygw"
+          fi
+      - name: Test in VM (${{ matrix.kver }}, ${{ matrix.server }})
+        env:
+          S3_SERVER: ${{ matrix.server }}
+          # AWS read tests need only run once per kernel
+          # AWS-dependent suites need only run once per kernel
+          SUITES: ${{ matrix.server == 'minio' && 'rw rw-tls tls faults nix' || 'rw rw-tls faults' }}
+        run: |
+          sudo apt-get install -y -qq "gcc-$(vm/fetch-kernel.sh ${{ matrix.kver }} --headers >/dev/null;
+            sed -n 's/^CONFIG_CC_VERSION_TEXT="x86_64-linux-gnu-gcc-\([0-9]*\) .*/\1/p' \
+            build/kernels/${{ matrix.kver }}/headers/usr/src/linux-headers-${{ matrix.kver }}/.config)"
+          tests/run.sh ${{ matrix.kver }}
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: vm-logs-${{ matrix.kver }}-${{ matrix.server }}
+          path: |
+            build/out/${{ matrix.kver }}/console.log
+            build/out/${{ matrix.kver }}/build.log
+            build/out/${{ matrix.kver }}/server.log
+
+  # Noble's own kernel source rebuilt with KASAN, lockdep, kmemleak and UBSAN.
+  # The kernel build is cached, keyed on the debug config and source package.
+  vm-test-sanitizers:
+    needs: build
+    runs-on: ubuntu-24.04
+    timeout-minutes: 150
+    steps:
+      - uses: actions/checkout@v4
+      - name: Enable KVM
+        run: |
+          echo 'KERNEL=="kvm", GROUP="kvm", MODE="0666", OPTIONS+="static_node=kvm"' |
+            sudo tee /etc/udev/rules.d/99-kvm.rules
+          sudo udevadm control --reload-rules
+          sudo udevadm trigger --name-match=kvm
+      - name: Install dependencies
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq qemu-system-x86 busybox-static cpio gcc-13 \
+            bc bison flex libelf-dev libssl-dev dwarves zstd libnl-genl-3-200 libkeyutils1
+          echo "SRCVER=$(apt-cache policy linux-source-6.8.0 | awk '/Candidate/ {print $2}')" >> "$GITHUB_ENV"
+      - uses: actions/cache@v4
+        with:
+          path: |
+            build/kernels/6.8.0-debug
+            build/noble-linux
+          key: debug-kernel-${{ env.SRCVER }}-${{ hashFiles('vm/debug.config', 'vm/build-debug-kernel.sh') }}
+      - name: Build sanitizer kernel
+        run: vm/build-debug-kernel.sh
+      - name: Get versitygw
+        run: |
+          mkdir -p build/tools
+          curl -fsSL "https://github.com/versity/versitygw/releases/download/$VERSITYGW_VERSION/versitygw_${VERSITYGW_VERSION}_Linux_x86_64.tar.gz" |
+            tar xz --strip-components=1 -C build/tools "versitygw_${VERSITYGW_VERSION}_Linux_x86_64/versitygw"
+      - name: Test in VM (sanitizers)
+        env:
+          S3_SERVER: versitygw
+          VM_MEM: "4096"
+          VM_TIMEOUT: "3000"
+        run: tests/run.sh 6.8.0-debug
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: vm-logs-sanitizers
+          path: build/out/6.8.0-debug/*.log
+
+  # Nix installed onto a ks3fs /nix/store, then a source build (needs internet).
+  vm-test-nixstore:
+    needs: [kernels, build]
+    runs-on: ubuntu-24.04
+    timeout-minutes: 120
+    strategy:
+      fail-fast: false
+      matrix:
+        # newest GA and newest HWE kernel
+        pick: [first-ga, last]
+    steps:
+      - uses: actions/checkout@v4
+      - name: Enable KVM
+        run: |
+          echo 'KERNEL=="kvm", GROUP="kvm", MODE="0666", OPTIONS+="static_node=kvm"' |
+            sudo tee /etc/udev/rules.d/99-kvm.rules
+          sudo udevadm control --reload-rules
+          sudo udevadm trigger --name-match=kvm
+      - name: Install test dependencies
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq qemu-system-x86 busybox-static cpio \
+            libnl-genl-3-200 libkeyutils1 zstd
+      - name: Pick kernel
+        run: |
+          if [ "${{ matrix.pick }}" = last ]; then
+            k=$(jq -r '.[-1]' <<<'${{ needs.kernels.outputs.matrix }}')
+          else
+            k=$(jq -r '[.[] | select(startswith("6.8."))][-1]' <<<'${{ needs.kernels.outputs.matrix }}')
+          fi
+          echo "KVER=$k" >> "$GITHUB_ENV"
+      - name: Get versitygw
+        run: |
+          mkdir -p build/tools
+          curl -fsSL "https://github.com/versity/versitygw/releases/download/$VERSITYGW_VERSION/versitygw_${VERSITYGW_VERSION}_Linux_x86_64.tar.gz" |
+            tar xz --strip-components=1 -C build/tools "versitygw_${VERSITYGW_VERSION}_Linux_x86_64/versitygw"
+      - name: Nix store on ks3fs (${{ env.KVER }})
+        env:
+          S3_SERVER: versitygw
+          SUITES: nixstore
+        run: tests/run.sh "$KVER"
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: vm-logs-nixstore-${{ matrix.pick }}
+          path: build/out/*/*.log
+
+  # A 6 GiB object in a 1 GiB guest: bounded memory, >5 GiB objects.
+  vm-test-big:
+    needs: [kernels, build]
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v4
+      - name: Enable KVM
+        run: |
+          echo 'KERNEL=="kvm", GROUP="kvm", MODE="0666", OPTIONS+="static_node=kvm"' |
+            sudo tee /etc/udev/rules.d/99-kvm.rules
+          sudo udevadm control --reload-rules
+          sudo udevadm trigger --name-match=kvm
+      - name: Install test dependencies
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq qemu-system-x86 busybox-static cpio \
+            libnl-genl-3-200 libkeyutils1 zstd
+      - name: Get versitygw
+        run: |
+          mkdir -p build/tools
+          curl -fsSL "https://github.com/versity/versitygw/releases/download/$VERSITYGW_VERSION/versitygw_${VERSITYGW_VERSION}_Linux_x86_64.tar.gz" |
+            tar xz --strip-components=1 -C build/tools "versitygw_${VERSITYGW_VERSION}_Linux_x86_64/versitygw"
+      - name: Big objects
+        env:
+          S3_SERVER: versitygw
+          SUITES: big
+        run: tests/run.sh "$(jq -r '.[-1]' <<<'${{ needs.kernels.outputs.matrix }}')"
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: vm-logs-big
+          path: build/out/*/*.log
+
+  # Early warning for VFS API drift: the newest mainline kernel (release or
+  # -rc) from kernel.ubuntu.com/mainline.  Failures here don't fail CI.
+  mainline:
+    runs-on: ubuntu-24.04
+    continue-on-error: true
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v4
+      - name: Enable KVM
+        run: |
+          echo 'KERNEL=="kvm", GROUP="kvm", MODE="0666", OPTIONS+="static_node=kvm"' |
+            sudo tee /etc/udev/rules.d/99-kvm.rules
+          sudo udevadm control --reload-rules
+          sudo udevadm trigger --name-match=kvm
+      - name: Install test dependencies
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq qemu-system-x86 busybox-static cpio \
+            libnl-genl-3-200 libkeyutils1 zstd
+      - name: Resolve the newest mainline kernel
+        run: |
+          printf 'mainline-latest\n' > /tmp/kernels.txt
+          k=$(KERNELS_FILE=/tmp/kernels.txt tests/resolve-kernels.sh)
+          echo "KVER=$k" >> "$GITHUB_ENV"
+          echo "mainline: $k" >> "$GITHUB_STEP_SUMMARY"
+      - name: Get versitygw
+        run: |
+          mkdir -p build/tools
+          curl -fsSL "https://github.com/versity/versitygw/releases/download/$VERSITYGW_VERSION/versitygw_${VERSITYGW_VERSION}_Linux_x86_64.tar.gz" |
+            tar xz --strip-components=1 -C build/tools "versitygw_${VERSITYGW_VERSION}_Linux_x86_64/versitygw"
+      - name: Build and test on ${{ env.KVER }}
+        env:
+          S3_SERVER: versitygw
+          SUITES: rw rw-tls tls faults
+        run: tests/run.sh "$KVER"
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: vm-logs-mainline
+          path: build/out/*/*.log
+
+  dkms:
+    needs: kernels
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - name: Build ks3fs-dkms package
+        run: packaging/build-deb.sh "$PWD/dist"
+      - name: Install via DKMS against every matrix kernel (build only)
+        run: |
+          mapfile -t kernels < <(jq -r '.[]' <<<'${{ needs.kernels.outputs.matrix }}')
+          packaging/test-dkms.sh dist/ks3fs-dkms_*_all.deb "${kernels[@]}"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ks3fs-dkms-deb
+          path: dist/*.deb
