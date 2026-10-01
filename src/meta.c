@@ -5,16 +5,25 @@
  *   x-amz-meta-mode   decimal st_mode, including the file type bits
  *   x-amz-meta-uid    decimal uid     x-amz-meta-gid  decimal gid
  *   x-amz-meta-mtime  seconds since the epoch, optionally with a fraction
+ *   x-amz-meta-xattr  extended attributes (see xattr.c)
  */
 #include <linux/kernel.h>
 #include <linux/string.h>
 #include <linux/ctype.h>
+#include <linux/slab.h>
 
 #include "ks3fs.h"
 
 void ks3fs_meta_clear(struct ks3fs_meta *m)
 {
 	memset(m, 0, sizeof(*m));
+}
+
+/* Free what @m owns (its xattr header) and clear it. */
+void ks3fs_meta_release(struct ks3fs_meta *m)
+{
+	kfree(m->xattr);
+	ks3fs_meta_clear(m);
 }
 
 static bool parse_u32(const char *val, u32 *out)

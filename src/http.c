@@ -436,6 +436,13 @@ static void parse_header(struct ks3fs_resp *resp, char *line)
 		} else if (sscanf(val, "bytes %lld-%lld", &a, &b) == 2) {
 			resp->range_start = a;
 		}
+	} else if (!strcasecmp(line, "x-amz-meta-xattr")) {
+		if (resp->want_xattr) {
+			kfree(resp->meta.xattr);
+			resp->meta.xattr = kstrdup(val, GFP_NOFS);
+			/* without memory for it, the set stays unknown */
+			resp->meta.has_xattr = resp->meta.xattr != NULL;
+		}
 	} else if (!strncasecmp(line, "x-amz-meta-", 11)) {
 		ks3fs_meta_parse_header(&resp->meta, line + 11, val);
 	}
@@ -458,7 +465,8 @@ again:
 	resp->close = false;
 	resp->etag[0] = '\0';
 	resp->last_modified = 0;
-	ks3fs_meta_clear(&resp->meta);
+	ks3fs_meta_release(&resp->meta);
+	resp->meta.has_xattr = resp->want_xattr;	/* absent: none */
 
 	n = conn_read_line(conn, line, RBUF_SIZE);
 	if (n < 0) {
@@ -629,6 +637,8 @@ struct ks3fs_conn *ks3fs_http_start(struct ks3fs_sb_info *sbi,
 		r = &local;
 	}
 	resp->head = !strcmp(req->method, "HEAD");
+	resp->want_xattr = req->want_xattr;
+	resp->meta.xattr = NULL;	/* owned by the caller on success */
 
 	for (;;) {
 		bool got_any = false, reused;
@@ -698,6 +708,7 @@ struct ks3fs_conn *ks3fs_http_start(struct ks3fs_sb_info *sbi,
 				    req->method, req->key ?: "", r->attempt, err);
 		err = -EIO;
 	}
+	ks3fs_meta_release(&resp->meta);
 	return ERR_PTR(err ?: -EIO);
 }
 

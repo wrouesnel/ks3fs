@@ -322,6 +322,8 @@ static void amz_collect(struct ks3fs_sb_info *sbi, struct ks3fs_req *req,
 				 (long long)m->mtime.tv_sec);
 		amz_add(set, "x-amz-meta-mtime", set->num[3]);
 	}
+	if (m && m->xattr)
+		amz_add(set, "x-amz-meta-xattr", m->xattr);
 	if (req->meta_replace)
 		amz_add(set, "x-amz-metadata-directive", "REPLACE");
 	sort(set->h, set->n, sizeof(set->h[0]), cmp_amz, NULL);

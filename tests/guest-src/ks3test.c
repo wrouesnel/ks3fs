@@ -17,6 +17,11 @@
  *   ks3test mmapwrite FILE OFF STRING
  *                           store STRING at OFF through a MAP_SHARED
  *                           mapping, then unmap and close (no msync)
+ *   ks3test setxattr FILE NAME VALUE [create|replace]
+ *                           setxattr(2); VALUE "-" removes NAME instead;
+ *                           prints strerror on failure
+ *   ks3test getxattr FILE NAME   print the value (or strerror)
+ *   ks3test listxattr FILE       print the names, one per line
  */
 #include <errno.h>
 #include <fcntl.h>
@@ -26,6 +31,7 @@
 #include <string.h>
 #include <sys/mman.h>
 #include <sys/time.h>
+#include <sys/xattr.h>
 #include <sys/syscall.h>
 #include <unistd.h>
 
@@ -175,6 +181,33 @@ static int mmapwrite(const char *path, long long off, const char *str)
 	return munmap(p, len) ? 1 : 0;
 }
 
+static int xattr_cmd(int argc, char **argv)
+{
+	static char buf[65536];
+	ssize_t n;
+
+	if (!strcmp(argv[1], "setxattr")) {
+		int flags = argc == 6 ? (!strcmp(argv[5], "create") ? XATTR_CREATE
+					: XATTR_REPLACE) : 0;
+
+		n = !strcmp(argv[4], "-") ? removexattr(argv[2], argv[3]) :
+			setxattr(argv[2], argv[3], argv[4], strlen(argv[4]), flags);
+	} else if (!strcmp(argv[1], "getxattr")) {
+		n = getxattr(argv[2], argv[3], buf, sizeof(buf));
+		if (n >= 0)
+			printf("%.*s\n", (int)n, buf);
+	} else {
+		n = listxattr(argv[2], buf, sizeof(buf));
+		for (ssize_t i = 0; i < n; i += strlen(buf + i) + 1)
+			printf("%s\n", buf + i);
+	}
+	if (n < 0) {
+		printf("%s\n", strerror(errno));
+		return 1;
+	}
+	return 0;
+}
+
 int main(int argc, char **argv)
 {
 	if (argc == 3 && !strcmp(argv[1], "sigread"))
@@ -211,11 +244,17 @@ int main(int argc, char **argv)
 				    strtoll(argv[4], NULL, 0), argv[5]);
 	if (argc == 5 && !strcmp(argv[1], "mmapwrite"))
 		return mmapwrite(argv[2], strtoll(argv[3], NULL, 0), argv[4]);
+	if (((argc == 5 || argc == 6) && !strcmp(argv[1], "setxattr")) ||
+	    (argc == 4 && !strcmp(argv[1], "getxattr")) ||
+	    (argc == 3 && !strcmp(argv[1], "listxattr")))
+		return xattr_cmd(argc, argv);
 	if ((argc == 3 || argc == 4) && !strcmp(argv[1], "pattern"))
 		return pattern(parse_size(argv[2]),
 			       argc == 4 ? strtoull(argv[3], NULL, 0) : 1);
 	fprintf(stderr, "usage: ks3test sigread FILE | pattern SIZE[K|M|G] [SEED] | rename OLD NEW |\n"
 		"       addkey TYPE DESC PAYLOAD | revokekey ID |\n"
-		"       fallocate MODE OFF LEN FILE | mmapwrite FILE OFF STRING\n");
+		"       fallocate MODE OFF LEN FILE | mmapwrite FILE OFF STRING |\n"
+		"       setxattr FILE NAME VALUE|- [create|replace] |\n"
+		"       getxattr FILE NAME | listxattr FILE\n");
 	return 2;
 }

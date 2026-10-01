@@ -222,6 +222,38 @@ eq "directory mode stored" "$(stat -c %a $M2/private)" "700"
 check "chmod implicit directory (creates a marker)" sh -c "chmod 711 $M/sp\ ace && sync"
 eq "implicit directory mode stored" "$(stat -c %a "$M2/sp ace")" "711"
 
+# ---- user xattrs (x-amz-meta-xattr, s3fs-fuse layout)
+xa() { ks3test "$@"; }
+echo m > $M/xa.txt
+check "setxattr" xa setxattr $M/xa.txt user.color blue
+check "second xattr" xa setxattr $M/xa.txt user.shape round
+eq "getxattr (local)" "$(xa getxattr $M/xa.txt user.color)" "blue"
+sync
+eq "xattr stored" "$(xa getxattr $M2/xa.txt user.color)" "blue"
+eq "listxattr" "$(xa listxattr $M2/xa.txt | sort | tr '\n' ' ')" "user.color user.shape "
+eq "missing xattr" "$(xa getxattr $M/xa.txt user.nope)" "No data available"
+eq "create flag refuses an existing name" "$(xa setxattr $M/xa.txt user.color red create)" "File exists"
+eq "replace flag refuses a missing name" "$(xa setxattr $M/xa.txt user.nope x replace)" "No data available"
+check "removexattr" xa setxattr $M/xa.txt user.shape -
+check "chmod after setting xattrs" chmod 600 $M/xa.txt
+sync
+eq "chmod keeps xattrs" "$(xa listxattr $M2/xa.txt)" "user.color"
+echo m > $M/xa.txt
+eq "rewriting the data keeps xattrs" "$(xa getxattr $M2/xa.txt user.color)" "blue"
+eq "too large for object metadata" "$(xa setxattr $M/xa.txt user.big $(head -c 3000 /dev/zero | tr '\0' x))" "Argument list too long"
+eq "too many to fit" "$(for i in 1 2 3 4 5 6 7 8; do xa setxattr $M/xa.txt user.v$i $(head -c 200 /dev/zero | tr '\0' v) || exit; done)" "No space left on device"
+for i in 1 2 3 4 5 6 7 8; do xa setxattr $M/xa.txt user.v$i -; done >/dev/null
+mkdir $M/xdir
+check "xattr on a directory" xa setxattr $M/xdir user.tag dir
+sync
+eq "directory xattr stored" "$(xa getxattr $M2/xdir user.tag)" "dir"
+check "rename a directory with xattrs" mv $M/xdir $M/xdir2
+eq "directory xattr survives rename" "$(xa getxattr $M2/xdir2 user.tag)" "dir"
+echo x > $M/xfile && xa setxattr $M/xfile user.k v && sync
+check "rename a file with xattrs" mv $M/xfile $M/xfile2
+eq "file xattr survives rename" "$(xa getxattr $M2/xfile2 user.k)" "v"
+eq "no xattrs on the bucket root" "$(xa setxattr $M user.k v)" "Operation not supported"
+
 check "symlink" ln -s hello.txt $M/link
 eq "readlink via other mount" "$(readlink $M2/link)" "hello.txt"
 eq "follow symlink" "$(cat $M2/link)" "hello world"

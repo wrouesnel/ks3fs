@@ -45,6 +45,7 @@ static struct inode *ks3fs_alloc_inode(struct super_block *sb)
 	ki->mpu = NULL;
 	ki->stream_next = 0;
 	ki->snap = NULL;
+	ki->xattr = NULL;
 	atomic_set(&ki->opens, 0);
 	return &ki->vfs_inode;
 }
@@ -54,6 +55,7 @@ static void ks3fs_free_inode(struct inode *inode)
 	struct ks3fs_inode *ki = KS3_I(inode);
 
 	kfree(ki->key);
+	kfree(ki->xattr);
 	kmem_cache_free(ks3fs_inode_cachep, ki);
 }
 
@@ -129,6 +131,9 @@ void ks3fs_apply_attr(struct inode *inode, const struct ks3fs_attr *attr)
 			inode->i_uid = make_kuid(&init_user_ns, m->uid);
 		if (sbi->meta && m->has_gid)
 			inode->i_gid = make_kgid(&init_user_ns, m->gid);
+		if (sbi->meta && m->has_xattr)
+			ks3fs_xattr_update(inode, m->xattr ?
+					   kstrdup(m->xattr, GFP_KERNEL) : NULL);
 	}
 	spin_lock(&ki->lock);
 	strscpy(ki->etag, attr->etag, sizeof(ki->etag));
@@ -138,17 +143,23 @@ void ks3fs_apply_attr(struct inode *inode, const struct ks3fs_attr *attr)
 	ki->attr_time = jiffies;
 }
 
-/* The metadata to store for an inode (everything the store can hold). */
-void ks3fs_inode_meta(struct inode *inode, struct ks3fs_meta *m)
+/*
+ * The metadata to store for an inode (everything the store can hold);
+ * release it with ks3fs_meta_release().  Rewriting an object replaces all
+ * its metadata, so xattrs not seen yet are fetched first.
+ */
+int ks3fs_inode_meta(struct inode *inode, struct ks3fs_meta *m)
 {
 	ks3fs_meta_clear(m);
 	if (!KS3_SB(inode->i_sb)->meta)
-		return;
+		return 0;
 	m->has_mode = m->has_uid = m->has_gid = m->has_mtime = true;
 	m->mode = inode->i_mode;
 	m->uid = from_kuid_munged(&init_user_ns, inode->i_uid);
 	m->gid = from_kgid_munged(&init_user_ns, inode->i_gid);
 	m->mtime = inode_get_mtime(inode);
+	m->has_xattr = true;
+	return ks3fs_xattr_header(inode, &m->xattr);
 }
 
 /*
@@ -239,7 +250,11 @@ int ks3fs_push_meta(struct inode *inode)
 		kfree(key);
 		return 0;
 	}
-	ks3fs_inode_meta(inode, &m);
+	err = ks3fs_inode_meta(inode, &m);
+	if (err) {
+		kfree(key);
+		goto fail;
+	}
 	if (S_ISDIR(inode->i_mode) && !test_bit(KS3_I_REMOTE, &ki->flags))
 		err = ks3fs_s3_put_buf(sbi, key, NULL, 0, &m, NULL);
 	else if (i_size_read(inode) > KS3FS_MAX_PUT)	/* too big for CopyObject */
@@ -247,6 +262,7 @@ int ks3fs_push_meta(struct inode *inode)
 					  &m, etag);
 	else
 		err = ks3fs_s3_set_meta(sbi, key, &m, etag);
+	ks3fs_meta_release(&m);
 	kfree(key);
 	if (err)
 		goto fail;
@@ -746,6 +762,7 @@ static int ks3fs_fill_super(struct super_block *sb, struct fs_context *fc)
 
 	sb->s_magic = KS3FS_MAGIC;
 	sb->s_op = &ks3fs_sops;
+	sb->s_xattr = ks3fs_xattr_handlers;
 	ks3_set_d_op(sb, &ks3fs_dops);
 	sb->s_maxbytes = MAX_LFS_FILESIZE;
 	sb->s_blocksize = PAGE_SIZE;

@@ -3,3 +3,6 @@
 
 # no special files (mknod is EPERM)
 generic/696	# vfstest setgid-create-umask: mknodat
+
+# S3 caps user metadata at 2 KiB per object, so only a few xattrs fit
+generic/020	# hundreds of attributes per file

@@ -26,11 +26,11 @@ static void log_failure(const char *op, const char *key, int status,
 			    op, key ?: "", status, code);
 }
 
-/* HEAD an object. */
-int ks3fs_s3_head(struct ks3fs_sb_info *sbi, const char *key,
-		   struct ks3fs_attr *attr)
+static int s3_head(struct ks3fs_sb_info *sbi, const char *key,
+		   struct ks3fs_attr *attr, bool want_xattr)
 {
-	struct ks3fs_req req = { .method = "HEAD", .key = key };
+	struct ks3fs_req req = { .method = "HEAD", .key = key,
+				 .want_xattr = want_xattr };
 	struct ks3fs_resp resp;
 	int err;
 
@@ -38,8 +38,10 @@ int ks3fs_s3_head(struct ks3fs_sb_info *sbi, const char *key,
 	if (err)
 		return err;
 	err = ks3fs_status_to_errno(resp.status);
-	if (err)
+	if (err) {
+		ks3fs_meta_release(&resp.meta);
 		return err;
+	}
 	attr->is_dir = false;
 	attr->has_marker = false;
 	attr->size = max_t(loff_t, resp.content_length, 0);
@@ -47,6 +49,23 @@ int ks3fs_s3_head(struct ks3fs_sb_info *sbi, const char *key,
 	strscpy(attr->etag, resp.etag, sizeof(attr->etag));
 	attr->meta = resp.meta;
 	return 0;
+}
+
+/* HEAD an object. */
+int ks3fs_s3_head(struct ks3fs_sb_info *sbi, const char *key,
+		  struct ks3fs_attr *attr)
+{
+	return s3_head(sbi, key, attr, false);
+}
+
+/*
+ * HEAD an object, keeping its xattrs too: attr->meta.xattr is then the
+ * caller's to free (ks3fs_meta_release()).
+ */
+int ks3fs_s3_head_xattr(struct ks3fs_sb_info *sbi, const char *key,
+			struct ks3fs_attr *attr)
+{
+	return s3_head(sbi, key, attr, true);
 }
 
 struct list_ctx {
@@ -299,7 +318,8 @@ int ks3fs_s3_list_dir(struct ks3fs_sb_info *sbi, const char *dirkey,
 
 /*
  * Look up @key (a full key without trailing '/').  A plain object wins over
- * a same-named "directory" prefix.
+ * a same-named "directory" prefix.  The attributes include the xattrs:
+ * release attr->meta when done.
  */
 int ks3fs_s3_stat(struct ks3fs_sb_info *sbi, const char *key,
 		  struct ks3fs_attr *attr)
@@ -308,7 +328,7 @@ int ks3fs_s3_stat(struct ks3fs_sb_info *sbi, const char *key,
 	char *dirkey;
 	int count = 0, err;
 
-	err = ks3fs_s3_head(sbi, key, attr);
+	err = ks3fs_s3_head_xattr(sbi, key, attr);
 	if (err != -ENOENT)
 		return err;
 
@@ -325,6 +345,7 @@ int ks3fs_s3_stat(struct ks3fs_sb_info *sbi, const char *key,
 	memset(attr, 0, sizeof(*attr));
 	attr->is_dir = true;
 	attr->has_marker = l.has_marker;
+	attr->meta.has_xattr = !l.has_marker;	/* no marker: none stored */
 	if (l.has_marker && sbi->meta) {
 		/* the marker object carries the directory's mode and times */
 		struct ks3fs_attr marker;
@@ -332,7 +353,7 @@ int ks3fs_s3_stat(struct ks3fs_sb_info *sbi, const char *key,
 		dirkey = kasprintf(GFP_NOFS, "%s/", key);
 		if (!dirkey)
 			return -ENOMEM;
-		err = ks3fs_s3_head(sbi, dirkey, &marker);
+		err = ks3fs_s3_head_xattr(sbi, dirkey, &marker);
 		kfree(dirkey);
 		if (!err) {
 			attr->meta = marker.meta;

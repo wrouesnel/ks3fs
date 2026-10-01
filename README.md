@@ -185,7 +185,9 @@ options:
 - Shared writable `mmap` works, but like other writes the data is stored on
   `msync`/`fsync`, close, or unmap of the last reference; mapped pages written
   to stay in memory until then.
-- No hard links, special files or xattrs. Metadata changes reach other clients
+- No hard links or special files. User xattrs (`user.*`) are stored the way
+  s3fs-fuse stores them (`x-amz-meta-xattr`), so S3's 2 KiB metadata limit
+  caps them at roughly 1.9 KiB per object, encoded. Metadata changes reach other clients
   after writeback (about 5 s to 30 s) or `sync`.
 - `O_DIRECT` is not supported.
 - `fallocate` reserves nothing (objects have no allocation): it extends the

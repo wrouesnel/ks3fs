@@ -690,8 +690,10 @@ static int mpu_start(struct inode *inode)
 	strscpy(mpu->base_etag, ki->etag, sizeof(mpu->base_etag));
 	spin_unlock(&ki->lock);
 
-	ks3fs_inode_meta(inode, &meta);
-	err = ks3fs_mpu_create(sbi, mpu->key, &meta, &mpu->upload_id);
+	err = ks3fs_inode_meta(inode, &meta);
+	if (!err)
+		err = ks3fs_mpu_create(sbi, mpu->key, &meta, &mpu->upload_id);
+	ks3fs_meta_release(&meta);
 	if (err) {
 		mpu_free(mpu);
 		return err;
@@ -880,7 +882,9 @@ static int put_whole(struct inode *inode, loff_t size)
 		return -ENOMEM;
 	req.key = key;
 	/* the new object carries the current metadata too */
-	ks3fs_inode_meta(inode, &meta);
+	err = ks3fs_inode_meta(inode, &meta);
+	if (err)
+		goto out;
 	req.meta = &meta;
 	clear_bit(KS3_I_META_DIRTY, &ki->flags);
 	conn = ks3fs_http_start(sbi, &req, &resp, send_file_body, &pb, NULL);
@@ -901,6 +905,7 @@ static int put_whole(struct inode *inode, loff_t size)
 out:
 	if (err && sbi->meta)
 		set_bit(KS3_I_META_DIRTY, &ki->flags);
+	ks3fs_meta_release(&meta);
 	kfree(key);
 	return err;
 }
@@ -1342,11 +1347,13 @@ const struct inode_operations ks3fs_symlink_iops = {
 	.get_link	= page_get_link,
 	.setattr	= ks3fs_setattr,
 	.getattr	= ks3fs_getattr,
+	.listxattr	= ks3fs_listxattr,
 };
 
 const struct inode_operations ks3fs_file_iops = {
 	.setattr	= ks3fs_setattr,
 	.getattr	= ks3fs_getattr,
+	.listxattr	= ks3fs_listxattr,
 };
 
 const struct file_operations ks3fs_file_fops = {

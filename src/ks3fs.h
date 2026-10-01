@@ -99,6 +99,7 @@ enum {
 	KS3_I_REMOTE,		/* an object (or dir marker) exists remotely */
 	KS3_I_META_DIRTY,	/* mode/owner/times not yet stored */
 	KS3_I_ORPHAN,		/* unlinked while open: object moved aside */
+	KS3_I_XATTR_KNOWN,	/* @xattr reflects the object's headers */
 };
 
 struct ks3fs_inode {
@@ -113,6 +114,7 @@ struct ks3fs_inode {
 	int stream_next;	/* next part the write path may stream out */
 	atomic_t opens;		/* open files (silly rename on unlink) */
 	struct ks3fs_snap *snap; /* dirs: recent listing, under @lock */
+	char *xattr;		/* x-amz-meta-xattr value or NULL, under @lock */
 };
 
 static inline struct ks3fs_inode *KS3_I(struct inode *inode)
@@ -124,12 +126,15 @@ static inline struct ks3fs_inode *KS3_I(struct inode *inode)
 
 struct ks3fs_meta {
 	bool has_mode, has_uid, has_gid, has_mtime;
+	bool has_xattr;		/* @xattr is known (NULL: there are none) */
 	umode_t mode;		/* including S_IFMT */
 	u32 uid, gid;		/* in the initial user namespace */
 	struct timespec64 mtime;
+	char *xattr;		/* x-amz-meta-xattr value, owned (kmalloc) */
 };
 
 void ks3fs_meta_clear(struct ks3fs_meta *m);
+void ks3fs_meta_release(struct ks3fs_meta *m);
 void ks3fs_meta_parse_header(struct ks3fs_meta *m, const char *name,
 			     const char *val);
 
@@ -171,6 +176,7 @@ struct ks3fs_req {
 	const char *copy_if_match; /* x-amz-copy-source-if-match */
 	const struct ks3fs_meta *meta;	/* sent as x-amz-meta-* */
 	bool meta_replace;	/* CopyObject: x-amz-metadata-directive: REPLACE */
+	bool want_xattr;	/* response: keep x-amz-meta-xattr */
 	const char *if_match;
 	const char *range;	/* "bytes=a-b" */
 	loff_t body_len;
@@ -189,6 +195,7 @@ struct ks3fs_resp {
 	loff_t range_start;	/* from Content-Range, -1 if absent */
 	loff_t total_size;	/* from Content-Range, -1 if absent */
 	struct ks3fs_meta meta;	/* x-amz-meta-* headers */
+	bool want_xattr;	/* keep x-amz-meta-xattr (meta.xattr) */
 
 	/* body decoder state */
 	loff_t remaining;	/* bytes left in body (or current chunk) */
@@ -281,6 +288,8 @@ int ks3fs_s3_stat(struct ks3fs_sb_info *sbi, const char *key,
 		  struct ks3fs_attr *attr);
 int ks3fs_s3_head(struct ks3fs_sb_info *sbi, const char *key,
 		  struct ks3fs_attr *attr);
+int ks3fs_s3_head_xattr(struct ks3fs_sb_info *sbi, const char *key,
+			struct ks3fs_attr *attr);
 
 struct ks3fs_keyent {
 	char *key;
@@ -360,7 +369,7 @@ struct inode *ks3fs_new_inode(struct super_block *sb, const char *key,
 void ks3fs_apply_attr(struct inode *inode, const struct ks3fs_attr *attr);
 umode_t ks3fs_attr_type(struct ks3fs_sb_info *sbi, const struct ks3fs_attr *attr);
 char *ks3fs_inode_key(struct inode *inode);
-void ks3fs_inode_meta(struct inode *inode, struct ks3fs_meta *m);
+int ks3fs_inode_meta(struct inode *inode, struct ks3fs_meta *m);
 int ks3fs_push_meta(struct inode *inode);
 int ks3fs_for_each_cached(struct super_block *sb, const char *prefix,
 			  int (*fn)(struct inode *, void *), void *arg);
@@ -379,5 +388,12 @@ int ks3fs_setattr(struct mnt_idmap *idmap, struct dentry *dentry,
 		  struct iattr *attr);
 int ks3fs_getattr(struct mnt_idmap *idmap, const struct path *path,
 		  struct kstat *stat, u32 mask, unsigned int flags);
+
+/* xattr.c */
+extern const struct xattr_handler * const ks3fs_xattr_handlers[];
+ssize_t ks3fs_listxattr(struct dentry *dentry, char *buf, size_t size);
+int ks3fs_xattr_load(struct inode *inode);
+void ks3fs_xattr_update(struct inode *inode, char *hdr);
+int ks3fs_xattr_header(struct inode *inode, char **out);
 
 #endif /* _KS3FS_H */

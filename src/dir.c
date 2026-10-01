@@ -193,7 +193,10 @@ struct prefetch {
 static void prefetch_free(struct kref *ref)
 {
 	struct prefetch *pf = container_of(ref, struct prefetch, ref);
+	int i;
 
+	for (i = 0; pf->attrs && i < pf->snap->l.nr; i++)
+		ks3fs_meta_release(&pf->attrs[i].meta);
 	snap_put(pf->snap);
 	kfree(pf->dirkey);
 	kvfree(pf->attrs);
@@ -220,7 +223,7 @@ static int prefetch_one(void *ctx, int i)
 		pf->status[i] = -ENOMEM;
 		return 0;
 	}
-	err = ks3fs_s3_head(pf->sbi, key, attr);
+	err = ks3fs_s3_head_xattr(pf->sbi, key, attr);
 	kfree(key);
 	if (e->is_dir) {
 		/* the listing proved the prefix exists; the marker is optional */
@@ -269,7 +272,8 @@ static bool prefetch_dir(struct dentry *parent, struct ks3fs_snap *snap,
 		if (pf->status[i])
 			continue;
 		if (i == want) {
-			*found = pf->attrs[i];
+			*found = pf->attrs[i];	/* with its xattrs */
+			pf->attrs[i].meta.xattr = NULL;
 			have = true;
 		} else {
 			prime_dcache(parent, snap->l.ents[i].name, &pf->attrs[i]);
@@ -345,6 +349,7 @@ static struct dentry *ks3fs_lookup(struct inode *dir, struct dentry *dentry,
 			key = dkey;
 		}
 		inode = ks3fs_new_inode(dir->i_sb, key, &attr);
+		ks3fs_meta_release(&attr.meta);
 	}
 	kfree(key);
 	if (IS_ERR(inode))
@@ -493,6 +498,7 @@ static struct ks3fs_meta *new_meta(struct inode *dir, umode_t mode,
 	}
 	ktime_get_real_ts64(&m->mtime);
 	m->mtime.tv_nsec = 0;	/* the store keeps whole seconds */
+	m->has_xattr = true;	/* a new object has none */
 	return m;
 }
 
@@ -703,10 +709,12 @@ static int dm_copy(void *ctx, int i)
 		 */
 		struct ks3fs_attr attr;
 
-		err = ks3fs_s3_head(dm->sbi, e->key, &attr);
-		if (!err)
+		err = ks3fs_s3_head_xattr(dm->sbi, e->key, &attr);
+		if (!err) {
 			err = ks3fs_s3_put_buf(dm->sbi, dst, NULL, 0, &attr.meta,
 					       NULL);
+			ks3fs_meta_release(&attr.meta);
+		}
 	} else if (e->size > KS3FS_MAX_PUT)
 		err = ks3fs_s3_copy_large(dm->sbi, e->key, dst, e->size, NULL,
 					  etag);
@@ -918,6 +926,35 @@ static bool attrs_fresh(struct ks3fs_sb_info *sbi, unsigned long when)
 	return time_before(jiffies, when + sbi->ttl);
 }
 
+/* Refresh a cached inode from what the store says about it now. */
+static int revalidate_apply(struct inode *inode, struct ks3fs_attr *attr)
+{
+	struct ks3fs_sb_info *sbi = KS3_SB(inode->i_sb);
+	struct ks3fs_inode *ki = KS3_I(inode);
+
+	if (ks3fs_attr_type(sbi, attr) != (inode->i_mode & S_IFMT))
+		return 0;	/* replaced by something of another type */
+
+	if (!attr->is_dir) {
+		bool changed;
+
+		spin_lock(&ki->lock);
+		changed = strcmp(ki->etag, attr->etag) != 0;
+		spin_unlock(&ki->lock);
+		if (changed && !test_bit(KS3_I_DIRTY, &ki->flags) &&
+		    !mapping_mapped(inode->i_mapping)) {
+			ks3fs_apply_attr(inode, attr);
+			invalidate_inode_pages2(inode->i_mapping);
+		} else if (!changed) {
+			ks3fs_apply_attr(inode, attr);	/* metadata may differ */
+		}
+	} else {
+		ks3fs_apply_attr(inode, attr);
+	}
+	ki->attr_time = jiffies;
+	return 1;
+}
+
 static int ks3fs_d_revalidate(KS3_REVALIDATE_ARGS)
 {
 	struct ks3fs_sb_info *sbi = KS3_SB(dentry->d_sb);
@@ -950,28 +987,11 @@ static int ks3fs_d_revalidate(KS3_REVALIDATE_ARGS)
 		return 0;
 	if (err)
 		return 1;	/* transient failure: keep what we have */
-	if (ks3fs_attr_type(sbi, &attr) != (inode->i_mode & S_IFMT))
-		return 0;	/* replaced by something of another type */
-
-	if (!attr.is_dir) {
-		bool changed;
-
-		spin_lock(&ki->lock);
-		changed = strcmp(ki->etag, attr.etag) != 0;
-		spin_unlock(&ki->lock);
-		if (changed && !test_bit(KS3_I_DIRTY, &ki->flags) &&
-		    !mapping_mapped(inode->i_mapping)) {
-			ks3fs_apply_attr(inode, &attr);
-			invalidate_inode_pages2(inode->i_mapping);
-		} else if (!changed) {
-			ks3fs_apply_attr(inode, &attr);	/* metadata may differ */
-		}
-	} else {
-		ks3fs_apply_attr(inode, &attr);
-	}
-	ki->attr_time = jiffies;
-	return 1;
+	err = revalidate_apply(inode, &attr);
+	ks3fs_meta_release(&attr.meta);
+	return err;
 }
+
 
 const struct dentry_operations ks3fs_dops = {
 	.d_revalidate	= ks3fs_d_revalidate,
@@ -987,6 +1007,7 @@ const struct inode_operations ks3fs_dir_iops = {
 	.rename		= ks3fs_rename,
 	.setattr	= ks3fs_setattr,
 	.getattr	= ks3fs_getattr,
+	.listxattr	= ks3fs_listxattr,
 };
 
 const struct file_operations ks3fs_dir_fops = {

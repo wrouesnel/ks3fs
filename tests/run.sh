@@ -262,6 +262,9 @@ verify_bucket() {	# what the rw suite left behind in bucket $1
 	want link 'hello.txt'
 	[ "$(s3 s3api head-object --bucket "$b" --key meta.txt --query 'Metadata.[mode,uid,gid,mtime]' --output text | tr '\t' ' ')" = "33256 1234 5678 1" ] ||
 		{ echo "host check: $b/meta.txt metadata"; fail=1; }
+	# xattrs as s3fs-fuse stores them: urlencode({"user.color":base64("blue")})
+	[ "$(s3 s3api head-object --bucket "$b" --key xa.txt --query Metadata.xattr --output text)" = '%7B%22user.color%22%3A%22Ymx1ZQ%3D%3D%22%7D' ] ||
+		{ echo "host check: $b/xa.txt xattrs"; fail=1; }
 	[ "$(s3 s3api head-object --bucket "$b" --key upload.bin --query ContentLength)" = 50331648 ] ||
 		{ echo "host check: $b/upload.bin size"; fail=1; }
 	[ "$(s3 s3 cp --quiet "s3://$b/rmw.bin" - | dd bs=1 skip=500000 count=3 2>/dev/null)" = XYZ ] ||
