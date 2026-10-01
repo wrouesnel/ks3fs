@@ -367,6 +367,7 @@ u64 ks3fs_key_ino(const char *key);
 struct inode *ks3fs_new_inode(struct super_block *sb, const char *key,
 			      const struct ks3fs_attr *attr);
 void ks3fs_apply_attr(struct inode *inode, const struct ks3fs_attr *attr);
+void ks3fs_rehash_ino(struct inode *inode);
 umode_t ks3fs_attr_type(struct ks3fs_sb_info *sbi, const struct ks3fs_attr *attr);
 char *ks3fs_inode_key(struct inode *inode);
 int ks3fs_inode_meta(struct inode *inode, struct ks3fs_meta *m);

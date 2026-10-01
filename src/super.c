@@ -175,6 +175,24 @@ u64 ks3fs_key_ino(const char *key)
 	return xxh64(key, strlen(key), 0) ?: 1;
 }
 
+/*
+ * After a rename moved @inode to another key: take that key's number, so
+ * that a new object created at the old key (with the old key's number)
+ * is not taken for the same file, and the number matches what a fresh
+ * mount would give it.
+ */
+void ks3fs_rehash_ino(struct inode *inode)
+{
+	char *key = ks3fs_inode_key(inode);
+
+	if (!key)
+		return;		/* keep the old number: unlikely to collide */
+	remove_inode_hash(inode);
+	inode->i_ino = ks3fs_key_ino(key);
+	insert_inode_hash(inode);
+	kfree(key);
+}
+
 struct inode *ks3fs_new_inode(struct super_block *sb, const char *key,
 			      const struct ks3fs_attr *attr)
 {
@@ -381,6 +399,7 @@ static int rekey_one(struct inode *inode, void *arg)
 	spin_unlock(&ki->lock);
 	kfree(old);
 	kfree(new);
+	ks3fs_rehash_ino(inode);
 	return 0;
 }
 

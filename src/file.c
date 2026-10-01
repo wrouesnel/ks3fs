@@ -1015,6 +1015,7 @@ int ks3fs_orphan(struct inode *inode)
 	if (etag[0])
 		strscpy(ki->etag, etag, sizeof(ki->etag));
 	spin_unlock(&ki->lock);
+	ks3fs_rehash_ino(inode);
 	set_bit(KS3_I_ORPHAN, &ki->flags);
 out:
 	kfree(key);

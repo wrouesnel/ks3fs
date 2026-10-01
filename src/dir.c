@@ -939,6 +939,7 @@ static int ks3fs_rename(struct mnt_idmap *idmap, struct inode *old_dir,
 	if (etag[0])
 		strscpy(ki->etag, etag, sizeof(ki->etag));
 	spin_unlock(&ki->lock);
+	ks3fs_rehash_ino(inode);
 	if (target)
 		clear_nlink(target);
 	ks3fs_dir_forget_snap(old_dir);
