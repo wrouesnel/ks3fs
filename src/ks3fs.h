@@ -125,11 +125,11 @@ static inline struct ks3fs_inode *KS3_I(struct inode *inode)
 /* ---------- per-object metadata (s3fs-fuse compatible x-amz-meta-*) ---------- */
 
 struct ks3fs_meta {
-	bool has_mode, has_uid, has_gid, has_mtime;
+	bool has_mode, has_uid, has_gid, has_mtime, has_ctime;
 	bool has_xattr;		/* @xattr is known (NULL: there are none) */
 	umode_t mode;		/* including S_IFMT */
 	u32 uid, gid;		/* in the initial user namespace */
-	struct timespec64 mtime;
+	struct timespec64 mtime, ctime;
 	char *xattr;		/* x-amz-meta-xattr value, owned (kmalloc) */
 };
 

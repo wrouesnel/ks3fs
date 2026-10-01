@@ -123,7 +123,8 @@ void ks3fs_apply_attr(struct inode *inode, const struct ks3fs_attr *attr)
 		if (sbi->meta && m->has_mtime)
 			ts = m->mtime;
 		inode_set_mtime_to_ts(inode, ts);
-		inode_set_ctime_to_ts(inode, ts);
+		inode_set_ctime_to_ts(inode, sbi->meta && m->has_ctime ?
+					     m->ctime : ts);
 		inode_set_atime_to_ts(inode, ts);
 		if (sbi->meta && m->has_mode)
 			inode->i_mode = (inode->i_mode & S_IFMT) | (m->mode & 07777);
@@ -154,10 +155,12 @@ int ks3fs_inode_meta(struct inode *inode, struct ks3fs_meta *m)
 	if (!KS3_SB(inode->i_sb)->meta)
 		return 0;
 	m->has_mode = m->has_uid = m->has_gid = m->has_mtime = true;
+	m->has_ctime = true;
 	m->mode = inode->i_mode;
 	m->uid = from_kuid_munged(&init_user_ns, inode->i_uid);
 	m->gid = from_kgid_munged(&init_user_ns, inode->i_gid);
 	m->mtime = inode_get_mtime(inode);
+	m->ctime = inode_get_ctime(inode);
 	m->has_xattr = true;
 	return ks3fs_xattr_header(inode, &m->xattr);
 }

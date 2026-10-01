@@ -257,7 +257,7 @@ static int sb_init(struct sbuf *s, size_t cap)
  * The x-amz-* headers of one request.  S3 requires every one of them to be
  * signed, and SigV4 wants them sorted, so they are collected here first.
  */
-#define MAX_AMZ	14
+#define MAX_AMZ	16
 
 struct amz_hdr {
 	const char *name;
@@ -267,7 +267,7 @@ struct amz_hdr {
 struct amz_set {
 	int n;
 	struct amz_hdr h[MAX_AMZ];
-	char num[4][40];	/* storage for formatted metadata values */
+	char num[5][40];	/* storage for formatted metadata values */
 };
 
 static void amz_add(struct amz_set *set, const char *name, const char *value)
@@ -280,6 +280,15 @@ static int cmp_amz(const void *a, const void *b)
 {
 	return strcmp(((const struct amz_hdr *)a)->name,
 		      ((const struct amz_hdr *)b)->name);
+}
+
+static void fmt_time(char *buf, size_t len, const struct timespec64 *ts)
+{
+	if (ts->tv_nsec)
+		snprintf(buf, len, "%lld.%09ld", (long long)ts->tv_sec,
+			 ts->tv_nsec);
+	else
+		snprintf(buf, len, "%lld", (long long)ts->tv_sec);
 }
 
 static void amz_collect(struct ks3fs_sb_info *sbi, struct ks3fs_req *req,
@@ -314,13 +323,12 @@ static void amz_collect(struct ks3fs_sb_info *sbi, struct ks3fs_req *req,
 		amz_add(set, "x-amz-meta-gid", set->num[2]);
 	}
 	if (m && m->has_mtime) {
-		if (m->mtime.tv_nsec)
-			snprintf(set->num[3], sizeof(set->num[3]), "%lld.%09ld",
-				 (long long)m->mtime.tv_sec, m->mtime.tv_nsec);
-		else
-			snprintf(set->num[3], sizeof(set->num[3]), "%lld",
-				 (long long)m->mtime.tv_sec);
+		fmt_time(set->num[3], sizeof(set->num[3]), &m->mtime);
 		amz_add(set, "x-amz-meta-mtime", set->num[3]);
+	}
+	if (m && m->has_ctime) {
+		fmt_time(set->num[4], sizeof(set->num[4]), &m->ctime);
+		amz_add(set, "x-amz-meta-ctime", set->num[4]);
 	}
 	if (m && m->xattr)
 		amz_add(set, "x-amz-meta-xattr", m->xattr);

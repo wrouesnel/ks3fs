@@ -534,11 +534,11 @@ int ks3fs_set_acl(struct mnt_idmap *idmap, struct dentry *dentry,
 	kfree(val);
 	if (err)
 		return err;
-	if (mode != inode->i_mode) {
-		inode->i_mode = mode;
-		set_bit(KS3_I_META_DIRTY, &KS3_I(inode)->flags);
-		ks3fs_schedule_meta_writeback(inode);
-	}
+	/* even when only the mode changed (or nothing did), as ext4 */
+	inode->i_mode = mode;
+	inode_set_ctime_current(inode);
+	set_bit(KS3_I_META_DIRTY, &KS3_I(inode)->flags);
+	ks3fs_schedule_meta_writeback(inode);
 	set_cached_acl(inode, type, acl);
 	return 0;
 }

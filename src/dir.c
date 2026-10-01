@@ -500,6 +500,8 @@ static struct ks3fs_meta *new_meta(struct inode *dir, umode_t mode,
 	}
 	ktime_get_real_ts64(&m->mtime);
 	m->mtime.tv_nsec = 0;	/* the store keeps whole seconds */
+	m->ctime = m->mtime;
+	m->has_ctime = true;
 	m->has_xattr = true;	/* a new object has none */
 	return m;
 }

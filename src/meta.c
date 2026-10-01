@@ -5,6 +5,7 @@
  *   x-amz-meta-mode   decimal st_mode, including the file type bits
  *   x-amz-meta-uid    decimal uid     x-amz-meta-gid  decimal gid
  *   x-amz-meta-mtime  seconds since the epoch, optionally with a fraction
+ *   x-amz-meta-ctime  the same, for the inode change time
  *   x-amz-meta-xattr  extended attributes (see xattr.c)
  */
 #include <linux/kernel.h>
@@ -77,5 +78,7 @@ void ks3fs_meta_parse_header(struct ks3fs_meta *m, const char *name,
 		m->has_gid = parse_u32(val, &m->gid);
 	} else if (!strcasecmp(name, "mtime")) {
 		m->has_mtime = parse_time(val, &m->mtime);
+	} else if (!strcasecmp(name, "ctime")) {
+		m->has_ctime = parse_time(val, &m->ctime);
 	}
 }
