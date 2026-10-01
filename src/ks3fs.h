@@ -75,7 +75,6 @@ struct ks3fs_sb_info {
 	struct list_head idle_conns;
 	int nr_idle;
 
-	atomic64_t next_ino;
 
 	/* lazy metadata writeback (see super.c) */
 	struct super_block *sb;
@@ -355,6 +354,7 @@ extern const struct address_space_operations ks3fs_aops;
 extern const struct dentry_operations ks3fs_dops;
 
 void ks3fs_dir_forget_snap(struct inode *dir);
+u64 ks3fs_key_ino(const char *key);
 struct inode *ks3fs_new_inode(struct super_block *sb, const char *key,
 			      const struct ks3fs_attr *attr);
 void ks3fs_apply_attr(struct inode *inode, const struct ks3fs_attr *attr);

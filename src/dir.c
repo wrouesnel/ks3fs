@@ -355,6 +355,36 @@ static struct dentry *ks3fs_lookup(struct inode *dir, struct dentry *dentry,
 
 /* ---------- readdir ---------- */
 
+/*
+ * d_ino for an entry: the cached inode's number if there is one (which
+ * may predate a rename), else the hash of its key that a lookup would
+ * give it, so readdir always agrees with stat().
+ */
+static u64 entry_ino(struct dentry *parent, struct inode *dir,
+		     struct ks3fs_list_entry *e)
+{
+	struct qstr q = QSTR_INIT(e->name, strlen(e->name));
+	struct dentry *dentry;
+	u64 ino = 0;
+	char *key;
+
+	q.hash = full_name_hash(parent, q.name, q.len);
+	dentry = d_lookup(parent, &q);
+	if (dentry) {
+		if (d_really_is_positive(dentry))
+			ino = d_inode(dentry)->i_ino;
+		dput(dentry);
+	}
+	if (ino)
+		return ino;
+	key = ks3fs_child_key(dir, &q, e->is_dir);
+	if (IS_ERR(key))
+		return 1;
+	ino = ks3fs_key_ino(key);
+	kfree(key);
+	return ino;
+}
+
 static int ks3fs_readdir(struct file *file, struct dir_context *ctx)
 {
 	struct inode *dir = file_inode(file);
@@ -413,7 +443,7 @@ static int ks3fs_readdir(struct file *file, struct dir_context *ctx)
 			type = DT_UNKNOWN;
 		}
 		if (!ino)
-			ino = full_name_hash(NULL, e->name, strlen(e->name)) | 1ULL << 40;
+			ino = entry_ino(file->f_path.dentry, dir, e);
 		if (!dir_emit(ctx, e->name, strlen(e->name), ino, type))
 			return 0;
 		ctx->pos++;

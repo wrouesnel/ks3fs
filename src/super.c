@@ -19,6 +19,7 @@
 #include <linux/backing-dev.h>
 #include <linux/pagemap.h>
 #include <linux/writeback.h>
+#include <linux/xxhash.h>
 #include <linux/nsproxy.h>
 #include <net/net_namespace.h>
 
@@ -150,6 +151,16 @@ void ks3fs_inode_meta(struct inode *inode, struct ks3fs_meta *m)
 	m->mtime = inode_get_mtime(inode);
 }
 
+/*
+ * Inode numbers are a hash of the object key, so readdir can report the
+ * same d_ino that stat() will (without a HEAD per entry) and numbers are
+ * stable across mounts.
+ */
+u64 ks3fs_key_ino(const char *key)
+{
+	return xxh64(key, strlen(key), 0) ?: 1;
+}
+
 struct inode *ks3fs_new_inode(struct super_block *sb, const char *key,
 			      const struct ks3fs_attr *attr)
 {
@@ -165,7 +176,7 @@ struct inode *ks3fs_new_inode(struct super_block *sb, const char *key,
 		iput(inode);
 		return ERR_PTR(-ENOMEM);
 	}
-	inode->i_ino = atomic64_inc_return(&sbi->next_ino);
+	inode->i_ino = ks3fs_key_ino(key);
 	inode->i_uid = sbi->uid;
 	inode->i_gid = sbi->gid;
 	set_nlink(inode, 1);	/* dirs too: unknown subdir count, see find(1) */
@@ -644,7 +655,6 @@ static int ks3fs_fill_super(struct super_block *sb, struct fs_context *fc)
 	sbi->sb = sb;
 	INIT_DELAYED_WORK(&sbi->meta_work, ks3fs_meta_work);
 	INIT_LIST_HEAD(&sbi->idle_conns);
-	atomic64_set(&sbi->next_ino, 1);
 
 	if (!ctx->port)
 		ctx->port = ctx->tls ? 443 : 80;
