@@ -256,7 +256,12 @@ module with DKMS on install and removes it on uninstall.
      dumps kernel stacks. It found two multipart bugs that are now fixed.
    - `xfstests` (opt-in; hours) boots an Ubuntu root image
      (`tools/build-xfstests-rootfs.sh`) and runs xfstests with
-     `FSTYP=ks3fs`, set with `XFSTESTS_ARGS` (default `-g quick`).
+     `FSTYP=ks3fs`, set with `XFSTESTS_ARGS` (default `-g quick`) or
+     `XFSTESTS_SHARD=i/n`. The quick group passes on 6.8 through 7.0, apart
+     from the documented limitations in `tests/guest/xfstests.exclude` and
+     the tests that need what ks3fs lacks (reflink, O_DIRECT, hard links,
+     block devices...). Tests that take hours on an object store are in
+     `tests/guest/xfstests.slow` (run with `XFSTESTS_SLOW=1`).
    - `big` has 16 checks (opt-in; slow). It runs in a 1 GiB guest:
      - writes a 6 GiB object, reads it back and verifies the hash;
      - appends to it, which copies the 384 unchanged parts server-side;
@@ -318,6 +323,8 @@ three is what caught the servers that ignore `encoding-type=url`.
 - **vm-test-nixstore** runs the Nix store suite on the newest GA and HWE
   kernels.
 - **vm-test-stress** runs fsx and fsstress on the newest kernel.
+- **xfstests** runs the quick group on the newest kernel in four shards
+  (weekly and on demand only).
 - **mainline** builds and VM-tests the newest mainline kernel (release or
   -rc) as an early warning for VFS API drift. Its failures don't fail CI.
 - **dkms** installs the `.deb` into a clean Noble container with headers for
@@ -327,8 +334,8 @@ A weekly schedule picks up new kernel ABIs.
 
 ## Roadmap
 
-1. Triage the xfstests `quick` group, keep an expected-results list, and run
-   it in CI on a schedule.
+1. O_TMPFILE, and `RENAME_EXCHANGE`/`RENAME_WHITEOUT` (overlayfs upper
+   layers).
 2. DNS via the `dns_resolver` key type as an alternative to the mount helper.
    Client certificates (mutual TLS) via `tls_client_hello_x509` and the keyring.
 3. Large folios.

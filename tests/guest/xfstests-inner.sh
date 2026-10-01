@@ -16,6 +16,13 @@ export MOUNT_OPTIONS="$opts"
 export TEST_FS_MOUNT_OPTS="$opts"
 CONF
 args=${XFSTESTS_ARGS:--g quick}
+# XFSTESTS_SHARD=i/n: every n-th test of the quick group, from the i-th
+if [ -n "${XFSTESTS_SHARD:-}" ]; then
+	i=${XFSTESTS_SHARD%/*} n=${XFSTESTS_SHARD#*/}
+	args=$(grep -l '_begin_fstest.*\bquick\b' tests/generic/[0-9]* |
+		sed 's|^tests/||' | sort | awk -v i="$i" -v n="$n" 'NR % n == i' |
+		tr '\n' ' ')
+fi
 # check wants options before test names
 [ -f /tests/xfstests.exclude ] && args="-E /tests/xfstests.exclude $args"
 [ "${XFSTESTS_SLOW:-0}" = 1 ] || [ ! -f /tests/xfstests.slow ] ||

@@ -109,7 +109,6 @@ jobs:
       - name: Test in VM (${{ matrix.kver }}, ${{ matrix.server }})
         env:
           S3_SERVER: ${{ matrix.server }}
-          # AWS read tests need only run once per kernel
           # AWS-dependent suites need only run once per kernel
           SUITES: ${{ matrix.server == 'minio' && 'rw rw-tls tls faults keys nix' || 'rw rw-tls faults keys' }}
         run: |
@@ -325,6 +324,62 @@ jobs:
         if: always()
         with:
           name: vm-logs-mainline
+          path: build/out/*/*.log
+
+  # xfstests' quick group on the newest kernel, in four shards.  Weekly and
+  # on demand only: each shard takes an hour or more.
+  xfstests:
+    if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
+    needs: [kernels, build]
+    runs-on: ubuntu-24.04
+    timeout-minutes: 300
+    strategy:
+      fail-fast: false
+      matrix:
+        shard: [0, 1, 2, 3]
+    steps:
+      - uses: actions/checkout@v4
+      - name: Enable KVM
+        run: |
+          echo 'KERNEL=="kvm", GROUP="kvm", MODE="0666", OPTIONS+="static_node=kvm"' |
+            sudo tee /etc/udev/rules.d/99-kvm.rules
+          sudo udevadm control --reload-rules
+          sudo udevadm trigger --name-match=kvm
+      - name: Install test dependencies
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq qemu-system-x86 busybox-static cpio \
+            libnl-genl-3-200 libkeyutils1 zstd
+      - name: Pick the kernel
+        run: echo "KVER=$(jq -r '.[-1]' <<<'${{ needs.kernels.outputs.matrix }}')" >> "$GITHUB_ENV"
+      - uses: actions/cache@v4
+        with:
+          path: build/kernels/${{ env.KVER }}
+          key: kernel-${{ env.KVER }}
+      - uses: actions/setup-go@v5
+        with:
+          go-version: "1.24"
+          cache: false
+      - uses: actions/cache@v4
+        with:
+          path: build/tools/minio
+          key: minio-${{ env.MINIO_TAG }}
+      - name: Get minio
+        run: mkdir -p build/tools && tools/build-minio.sh
+      - name: xfstests quick group, shard ${{ matrix.shard }}/4
+        env:
+          S3_SERVER: minio
+          SUITES: xfstests
+          XFSTESTS_SHARD: ${{ matrix.shard }}/4
+        run: |
+          sudo apt-get install -y -qq "gcc-$(vm/fetch-kernel.sh "$KVER" --headers >/dev/null;
+            sed -n 's/^CONFIG_CC_VERSION_TEXT="x86_64-linux-gnu-gcc-\([0-9]*\) .*/\1/p' \
+            build/kernels/$KVER/headers/usr/src/linux-headers-$KVER/.config)"
+          tests/run.sh "$KVER"
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: vm-logs-xfstests-${{ matrix.shard }}
           path: build/out/*/*.log
 
   dkms:
