@@ -21,7 +21,7 @@ jobs:
     outputs:
       matrix: ${{ steps.resolve.outputs.matrix }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - id: resolve
         run: |
           sudo apt-get update -qq
@@ -31,7 +31,7 @@ jobs:
   lint:
     runs-on: ubuntu-24.04
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - run: shellcheck -S warning vm/*.sh tests/*.sh packaging/*.sh tools/*.sh tools/mount.ks3fs
 
   build:
@@ -42,8 +42,8 @@ jobs:
       matrix:
         kver: ${{ fromJSON(needs.kernels.outputs.matrix) }}
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/cache@v4
+      - uses: actions/checkout@v7
+      - uses: actions/cache@v6
         with:
           path: build/kernels/${{ matrix.kver }}
           key: kernel-${{ matrix.kver }}
@@ -55,7 +55,7 @@ jobs:
           command -v "$CC" || sudo apt-get install -y -qq "${CC#x86_64-linux-gnu-}"
           make -C src KDIR="$KDIR" CC="$CC" 2>&1 | tee build.log
           ! grep "warning:" build.log | grep -vE "compiler differs|pahole version differs"
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         with:
           name: ks3fs-${{ matrix.kver }}
           path: src/ks3fs.ko
@@ -70,7 +70,7 @@ jobs:
         kver: ${{ fromJSON(needs.kernels.outputs.matrix) }}
         server: [minio, versitygw, rgw]
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - name: Enable KVM
         run: |
           echo 'KERNEL=="kvm", GROUP="kvm", MODE="0666", OPTIONS+="static_node=kvm"' |
@@ -83,16 +83,16 @@ jobs:
           sudo apt-get update -qq
           sudo apt-get install -y -qq qemu-system-x86 busybox-static cpio \
             libnl-genl-3-200 libkeyutils1 zstd
-      - uses: actions/cache@v4
+      - uses: actions/cache@v6
         with:
           path: build/kernels/${{ matrix.kver }}
           key: kernel-${{ matrix.kver }}
-      - uses: actions/setup-go@v5
+      - uses: actions/setup-go@v7
         if: matrix.server == 'minio'
         with:
           go-version: "1.24"
           cache: false
-      - uses: actions/cache@v4
+      - uses: actions/cache@v6
         if: matrix.server == 'minio'
         with:
           path: build/tools/minio
@@ -116,7 +116,7 @@ jobs:
             sed -n 's/^CONFIG_CC_VERSION_TEXT="x86_64-linux-gnu-gcc-\([0-9]*\) .*/\1/p' \
             build/kernels/${{ matrix.kver }}/headers/usr/src/linux-headers-${{ matrix.kver }}/.config)"
           tests/run.sh ${{ matrix.kver }}
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         if: always()
         with:
           name: vm-logs-${{ matrix.kver }}-${{ matrix.server }}
@@ -132,7 +132,7 @@ jobs:
     runs-on: ubuntu-24.04
     timeout-minutes: 150
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - name: Enable KVM
         run: |
           echo 'KERNEL=="kvm", GROUP="kvm", MODE="0666", OPTIONS+="static_node=kvm"' |
@@ -145,7 +145,7 @@ jobs:
           sudo apt-get install -y -qq qemu-system-x86 busybox-static cpio gcc-13 \
             bc bison flex libelf-dev libssl-dev dwarves zstd libnl-genl-3-200 libkeyutils1
           echo "SRCVER=$(apt-cache policy linux-source-6.8.0 | awk '/Candidate/ {print $2}')" >> "$GITHUB_ENV"
-      - uses: actions/cache@v4
+      - uses: actions/cache@v6
         with:
           path: |
             build/kernels/6.8.0-debug
@@ -164,7 +164,7 @@ jobs:
           VM_MEM: "4096"
           VM_TIMEOUT: "3000"
         run: tests/run.sh 6.8.0-debug
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         if: always()
         with:
           name: vm-logs-sanitizers
@@ -181,7 +181,7 @@ jobs:
         # newest GA and newest HWE kernel
         pick: [first-ga, last]
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - name: Enable KVM
         run: |
           echo 'KERNEL=="kvm", GROUP="kvm", MODE="0666", OPTIONS+="static_node=kvm"' |
@@ -211,7 +211,7 @@ jobs:
           S3_SERVER: versitygw
           SUITES: nixstore
         run: tests/run.sh "$KVER"
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         if: always()
         with:
           name: vm-logs-nixstore-${{ matrix.pick }}
@@ -223,7 +223,7 @@ jobs:
     runs-on: ubuntu-24.04
     timeout-minutes: 90
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - name: Enable KVM
         run: |
           echo 'KERNEL=="kvm", GROUP="kvm", MODE="0666", OPTIONS+="static_node=kvm"' |
@@ -245,7 +245,7 @@ jobs:
           S3_SERVER: versitygw
           SUITES: stress
         run: tests/run.sh "$(jq -r '.[-1]' <<<'${{ needs.kernels.outputs.matrix }}')"
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         if: always()
         with:
           name: vm-logs-stress
@@ -257,7 +257,7 @@ jobs:
     runs-on: ubuntu-24.04
     timeout-minutes: 60
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - name: Enable KVM
         run: |
           echo 'KERNEL=="kvm", GROUP="kvm", MODE="0666", OPTIONS+="static_node=kvm"' |
@@ -279,7 +279,7 @@ jobs:
           S3_SERVER: versitygw
           SUITES: big
         run: tests/run.sh "$(jq -r '.[-1]' <<<'${{ needs.kernels.outputs.matrix }}')"
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         if: always()
         with:
           name: vm-logs-big
@@ -292,7 +292,7 @@ jobs:
     continue-on-error: true
     timeout-minutes: 60
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - name: Enable KVM
         run: |
           echo 'KERNEL=="kvm", GROUP="kvm", MODE="0666", OPTIONS+="static_node=kvm"' |
@@ -320,7 +320,7 @@ jobs:
           S3_SERVER: versitygw
           SUITES: rw rw-tls tls faults
         run: tests/run.sh "$KVER"
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         if: always()
         with:
           name: vm-logs-mainline
@@ -338,7 +338,7 @@ jobs:
       matrix:
         shard: [0, 1, 2, 3]
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - name: Enable KVM
         run: |
           echo 'KERNEL=="kvm", GROUP="kvm", MODE="0666", OPTIONS+="static_node=kvm"' |
@@ -352,15 +352,15 @@ jobs:
             libnl-genl-3-200 libkeyutils1 zstd
       - name: Pick the kernel
         run: echo "KVER=$(jq -r '.[-1]' <<<'${{ needs.kernels.outputs.matrix }}')" >> "$GITHUB_ENV"
-      - uses: actions/cache@v4
+      - uses: actions/cache@v6
         with:
           path: build/kernels/${{ env.KVER }}
           key: kernel-${{ env.KVER }}
-      - uses: actions/setup-go@v5
+      - uses: actions/setup-go@v7
         with:
           go-version: "1.24"
           cache: false
-      - uses: actions/cache@v4
+      - uses: actions/cache@v6
         with:
           path: build/tools/minio
           key: minio-${{ env.MINIO_TAG }}
@@ -376,7 +376,7 @@ jobs:
             sed -n 's/^CONFIG_CC_VERSION_TEXT="x86_64-linux-gnu-gcc-\([0-9]*\) .*/\1/p' \
             build/kernels/$KVER/headers/usr/src/linux-headers-$KVER/.config)"
           tests/run.sh "$KVER"
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         if: always()
         with:
           name: vm-logs-xfstests-${{ matrix.shard }}
@@ -386,11 +386,11 @@ jobs:
     needs: kernels
     runs-on: ubuntu-24.04
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - name: Install packaging tools
         run: |
           sudo apt-get update -qq
-          sudo apt-get install -y -qq --no-install-recommends debhelper dh-dkms devscripts
+          sudo apt-get install -y -qq --no-install-recommends build-essential debhelper dh-dkms devscripts
       - name: Build ks3fs-dkms package (from debian/, as the PPA does)
         run: packaging/build-deb.sh "$PWD/dist"
       - name: Build the source package (unsigned)
@@ -399,7 +399,7 @@ jobs:
         run: |
           mapfile -t kernels < <(jq -r '.[]' <<<'${{ needs.kernels.outputs.matrix }}')
           packaging/test-dkms.sh dist/ks3fs-dkms_*_all.deb "${kernels[@]}"
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         with:
           name: ks3fs-dkms-deb
           path: dist/*.deb
