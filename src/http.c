@@ -41,6 +41,7 @@ struct ks3fs_conn {
 	size_t rpos, rlen;
 	bool reused;
 	bool broken;
+	bool done;		/* response complete, server closes: no FIN of ours */
 	unsigned long idle_since;
 };
 
@@ -69,6 +70,7 @@ static bool retryable_err(int err)
 	case -EPROTO:		/* malformed or truncated response */
 	case -EBADMSG:		/* kTLS: record cut short or corrupted */
 	case -EAGAIN:		/* 429/5xx from the server */
+	case -EADDRNOTAVAIL:	/* out of local ports (TIME_WAIT): they free up */
 		return true;
 	default:
 		return false;
@@ -154,7 +156,16 @@ static void conn_destroy(struct ks3fs_conn *conn)
 	if (!conn)
 		return;
 	if (conn->sock) {
-		kernel_sock_shutdown(conn->sock, SHUT_RDWR);
+		/*
+		 * Servers that close after every response (versitygw, RGW) would
+		 * otherwise leave a TIME_WAIT socket behind for each request, and
+		 * a busy mount runs out of local ports (EADDRNOTAVAIL).  With the
+		 * whole response read there is nothing to lose: reset instead.
+		 */
+		if (conn->done)
+			sock_no_linger(conn->sock->sk);
+		else
+			kernel_sock_shutdown(conn->sock, SHUT_RDWR);
 		if (conn->file)
 			fput(conn->file);	/* releases the socket */
 		else
@@ -598,6 +609,8 @@ void ks3fs_http_finish(struct ks3fs_sb_info *sbi, struct ks3fs_conn *conn,
 		}
 		kfree(tmp);
 	}
+	if (resp->close && !conn->broken && resp->body_done)
+		conn->done = true;
 	if (conn->broken || resp->close || !resp->body_done ||
 	    conn->rpos != conn->rlen)
 		conn_destroy(conn);
