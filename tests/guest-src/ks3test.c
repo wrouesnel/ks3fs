@@ -10,6 +10,13 @@
  *   ks3test rename OLD NEW  rename(2); prints strerror on failure
  *   ks3test addkey TYPE DESC PAYLOAD   add_key(2) into the user keyring
  *   ks3test revokekey ID               keyctl(KEYCTL_REVOKE)
+ *   ks3test fallocate MODE OFF LEN FILE
+ *                           fallocate(2); MODE is a comma list of keep,
+ *                           punch, zero, collapse, insert (or 0); prints
+ *                           strerror on failure
+ *   ks3test mmapwrite FILE OFF STRING
+ *                           store STRING at OFF through a MAP_SHARED
+ *                           mapping, then unmap and close (no msync)
  */
 #include <errno.h>
 #include <fcntl.h>
@@ -17,6 +24,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <sys/mman.h>
 #include <sys/time.h>
 #include <sys/syscall.h>
 #include <unistd.h>
@@ -120,6 +128,53 @@ static int pattern(long long size, unsigned long long seed)
 	return 0;
 }
 
+static int do_fallocate(const char *modes, long long off, long long len,
+			const char *path)
+{
+	static const struct { const char *name; int flag; } names[] = {
+		{ "keep", 0x01 }, { "punch", 0x02 }, { "collapse", 0x08 },
+		{ "zero", 0x10 }, { "insert", 0x20 },
+	};
+	char buf[128], *tok, *save;
+	int mode = 0, fd;
+	size_t i;
+
+	snprintf(buf, sizeof(buf), "%s", modes);
+	for (tok = strtok_r(buf, ",", &save); tok; tok = strtok_r(NULL, ",", &save)) {
+		for (i = 0; i < sizeof(names) / sizeof(names[0]); i++)
+			if (!strcmp(tok, names[i].name))
+				mode |= names[i].flag;
+	}
+	fd = open(path, O_RDWR);
+	if (fd < 0 || syscall(SYS_fallocate, fd, mode, off, len)) {
+		printf("%s\n", strerror(errno));
+		return 1;
+	}
+	return close(fd) ? 1 : 0;
+}
+
+static int mmapwrite(const char *path, long long off, const char *str)
+{
+	long pg = sysconf(_SC_PAGESIZE);
+	long long base = off / pg * pg;
+	size_t len = off - base + strlen(str);
+	int fd = open(path, O_RDWR);
+	char *p;
+
+	if (fd < 0) {
+		perror("open");
+		return 1;
+	}
+	p = mmap(NULL, len, PROT_READ | PROT_WRITE, MAP_SHARED, fd, base);
+	if (p == MAP_FAILED) {
+		printf("%s\n", strerror(errno));
+		return 1;
+	}
+	close(fd);	/* the mapping keeps the file open */
+	memcpy(p + (off - base), str, strlen(str));
+	return munmap(p, len) ? 1 : 0;
+}
+
 int main(int argc, char **argv)
 {
 	if (argc == 3 && !strcmp(argv[1], "sigread"))
@@ -151,10 +206,16 @@ int main(int argc, char **argv)
 		}
 		return 0;
 	}
+	if (argc == 6 && !strcmp(argv[1], "fallocate"))
+		return do_fallocate(argv[2], strtoll(argv[3], NULL, 0),
+				    strtoll(argv[4], NULL, 0), argv[5]);
+	if (argc == 5 && !strcmp(argv[1], "mmapwrite"))
+		return mmapwrite(argv[2], strtoll(argv[3], NULL, 0), argv[4]);
 	if ((argc == 3 || argc == 4) && !strcmp(argv[1], "pattern"))
 		return pattern(parse_size(argv[2]),
 			       argc == 4 ? strtoull(argv[3], NULL, 0) : 1);
 	fprintf(stderr, "usage: ks3test sigread FILE | pattern SIZE[K|M|G] [SEED] | rename OLD NEW |\n"
-		"       addkey TYPE DESC PAYLOAD | revokekey ID\n");
+		"       addkey TYPE DESC PAYLOAD | revokekey ID |\n"
+		"       fallocate MODE OFF LEN FILE | mmapwrite FILE OFF STRING\n");
 	return 2;
 }

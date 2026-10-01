@@ -23,6 +23,8 @@
 #include <linux/pagevec.h>
 #endif
 #include <linux/sched/signal.h>
+#include <linux/bvec.h>
+#include <linux/falloc.h>
 
 #include "ks3fs.h"
 
@@ -1161,6 +1163,99 @@ static ssize_t ks3fs_splice_read(struct file *in, loff_t *ppos,
 	return err ?: filemap_splice_read(in, ppos, pipe, len, flags);
 }
 
+/* Write zeros over [pos, end) through the page cache, as write(2) would. */
+static int zero_range(struct file *file, loff_t pos, loff_t end)
+{
+	struct inode *inode = file_inode(file);
+	struct bio_vec bv[32];
+	struct kiocb kiocb;
+	int i;
+
+	for (i = 0; i < ARRAY_SIZE(bv); i++)
+		bvec_set_page(&bv[i], ZERO_PAGE(0), PAGE_SIZE, 0);
+	init_sync_kiocb(&kiocb, file);
+	kiocb.ki_pos = pos;
+	while (kiocb.ki_pos < end) {
+		size_t n = min_t(loff_t, end - kiocb.ki_pos,
+				 ARRAY_SIZE(bv) * PAGE_SIZE);
+		struct iov_iter it;
+		ssize_t ret;
+
+		iov_iter_bvec(&it, ITER_SOURCE, bv, DIV_ROUND_UP(n, PAGE_SIZE),
+			      n);
+		ret = generic_perform_write(&kiocb, &it);
+		if (ret < 0)
+			return ret;
+		/* like write(2), a large range streams out completed parts */
+		mpu_stream(inode, kiocb.ki_pos);
+		cond_resched();
+	}
+	return 0;
+}
+
+/*
+ * Objects have no allocation to reserve, so plain fallocate only extends
+ * the size (the new range reads as zeros without storing anything until
+ * the next upload).  Punching or zeroing a range writes zeros over it in
+ * the page cache.  Collapsing or inserting would rewrite everything
+ * after the range and is not offered.
+ */
+static long ks3fs_fallocate(struct file *file, int mode, loff_t offset,
+			    loff_t len)
+{
+	struct inode *inode = file_inode(file);
+	struct ks3fs_inode *ki = KS3_I(inode);
+	loff_t end = offset + len, size;
+	int err;
+
+	if (mode & ~(FALLOC_FL_KEEP_SIZE | FALLOC_FL_PUNCH_HOLE |
+		     FALLOC_FL_ZERO_RANGE))
+		return -EOPNOTSUPP;
+	/* no object can be that large: as good as out of space */
+	if (!(mode & FALLOC_FL_KEEP_SIZE) &&
+	    end > ks3fs_max_object(KS3_SB(inode->i_sb)))
+		return -ENOSPC;
+
+	inode_lock(inode);
+	size = i_size_read(inode);
+	/* RLIMIT_FSIZE (with SIGXFSZ), as for a write */
+	if (!(mode & FALLOC_FL_KEEP_SIZE) && end > size) {
+		err = inode_newsize_ok(inode, end);
+		if (err)
+			goto out;
+	}
+	/* drops setuid/setgid even when there is nothing to do (as ext4) */
+	err = file_modified(file);
+	if (err)
+		goto out;
+	if (mode == FALLOC_FL_KEEP_SIZE || (!mode && end <= size))
+		goto out;	/* nothing to reserve */
+	/* uploaded parts are frozen until the upload completes */
+	if (range_frozen(inode, offset, min(end, size) - offset)) {
+		err = ks3fs_upload_locked(inode);
+		if (err)
+			goto out;
+	}
+	if (mode & (FALLOC_FL_PUNCH_HOLE | FALLOC_FL_ZERO_RANGE)) {
+		err = zero_range(file, offset, min(end, size));
+		if (err)
+			goto out;
+	}
+	if (!(mode & FALLOC_FL_KEEP_SIZE) && end > size) {
+		/* bytes past the old EOF in its folio must read back as zeros */
+		err = zero_range(file, size,
+				 min_t(loff_t, end, round_up(size, PAGE_SIZE)));
+		if (err)
+			goto out;
+		truncate_setsize(inode, end);
+		inode->i_blocks = DIV_ROUND_UP_ULL(end, 512);
+		set_bit(KS3_I_DIRTY, &ki->flags);
+	}
+out:
+	inode_unlock(inode);
+	return err;
+}
+
 int ks3fs_setattr(struct mnt_idmap *idmap, struct dentry *dentry,
 		  struct iattr *attr)
 {
@@ -1265,4 +1360,5 @@ const struct file_operations ks3fs_file_fops = {
 	.fsync		= ks3fs_fsync,
 	.splice_read	= ks3fs_splice_read,
 	.splice_write	= iter_file_splice_write,
+	.fallocate	= ks3fs_fallocate,
 };

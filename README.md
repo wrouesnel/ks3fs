@@ -188,6 +188,9 @@ options:
 - No hard links, special files or xattrs. Metadata changes reach other clients
   after writeback (about 5 s to 30 s) or `sync`.
 - `O_DIRECT` is not supported.
+- `fallocate` reserves nothing (objects have no allocation): it extends the
+  size, and punching or zeroing a range writes zeros. Collapsing and
+  inserting ranges are not supported.
 
 ## Building
 

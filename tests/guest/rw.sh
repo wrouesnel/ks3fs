@@ -73,6 +73,26 @@ eq "shrunk content" "$(cat $M2/trunc.txt)" "hello"
 check "truncate grow" truncate -s 8 $M/trunc.txt
 eq "grown tail is zero" "$(od -An -c $M2/trunc.txt | tr -d ' ')" 'hello\0\0\0'
 
+# fallocate: extend, keep-size no-op, punch and zero ranges, no collapse
+odc() { od -An -c "$1" | tr -d ' \n'; }
+printf 'abcdefghij' > $M/falloc.txt
+check "fallocate extends" ks3test fallocate 0 0 16 $M/falloc.txt
+eq "extended size" "$(stat -c %s $M2/falloc.txt)" 16
+eq "extended tail is zero" "$(odc $M2/falloc.txt)" 'abcdefghij\0\0\0\0\0\0'
+check "fallocate keep-size past EOF" ks3test fallocate keep 0 4096 $M/falloc.txt
+eq "keep-size leaves the size" "$(stat -c %s $M/falloc.txt)" 16
+check "punch a hole" ks3test fallocate keep,punch 2 3 $M/falloc.txt
+eq "punched range reads zero" "$(odc $M2/falloc.txt)" 'ab\0\0\0fghij\0\0\0\0\0\0'
+check "zero a range across EOF" ks3test fallocate zero 8 12 $M/falloc.txt
+eq "zero range extends the file" "$(stat -c %s $M2/falloc.txt)" 20
+eq "zeroed range" "$(odc $M2/falloc.txt)" 'ab\0\0\0fgh\0\0\0\0\0\0\0\0\0\0\0\0'
+eq "collapse is refused" "$(ks3test fallocate collapse 0 4096 $M/falloc.txt)" "Operation not supported"
+
+# shared writable mmap: stored when the last reference goes, without msync
+printf 'hello mmap world' > $M/mmap.txt
+check "store through a shared mapping" ks3test mmapwrite $M/mmap.txt 6 MMAP
+eq "mapped store reaches the object" "$(cat $M2/mmap.txt)" "hello MMAP world"
+
 # ---- multipart uploads: with 5 MiB parts, files of 10 MiB and more
 # stream completed parts out while they are still being written
 pat() { ks3test pattern "$@"; }
@@ -87,6 +107,9 @@ eq "appended content" "$(sha $M2/mp.bin)" "$(psha 'ks3test pattern 23M 7; ks3tes
 printf 'MIDDLE' | dd of=$MP/mp.bin bs=1 seek=12000000 conv=notrunc 2>/dev/null
 eq "in-place write into a multipart object" "$(dd if=$M2/mp.bin bs=1 skip=12000000 count=6 2>/dev/null)" "MIDDLE"
 eq "size after in-place write" "$(stat -c %s $M2/mp.bin)" "25165824"
+check "mapped store into a multipart object" ks3test mmapwrite $MP/mp.bin 20000003 MAPPED
+eq "mapped store via other mount" "$(dd if=$M2/mp.bin bs=1 skip=20000003 count=6 2>/dev/null)" "MAPPED"
+eq "rest of the object unchanged" "$(dd if=$M2/mp.bin bs=1 skip=12000000 count=6 2>/dev/null)" "MIDDLE"
 # read parts of a file that were already streamed out while it is still open
 ( exec 3>$MP/open.bin
   ks3test pattern 16M 9 >&3
