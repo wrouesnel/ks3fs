@@ -952,8 +952,10 @@ int ks3fs_orphan(struct inode *inode)
 			return err;
 	}
 	key = ks3fs_inode_key(inode);
-	orphan = kasprintf(GFP_KERNEL, "%s%s/%lx-%llx", sbi->prefix,
-			   KS3FS_ORPHANS, inode->i_ino, ktime_get_real_ns());
+	/* i_ino is unsigned long before 7.3 and u64 after */
+	orphan = kasprintf(GFP_KERNEL, "%s%s/%llx-%llx", sbi->prefix,
+			   KS3FS_ORPHANS, (unsigned long long)inode->i_ino,
+			   ktime_get_real_ns());
 	if (!key || !orphan) {
 		err = -ENOMEM;
 		goto out;
