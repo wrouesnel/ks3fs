@@ -198,16 +198,44 @@ options:
   size, and punching or zeroing a range writes zeros. Collapsing and
   inserting ranges are not supported.
 
+## Installing
+
+On Ubuntu 24.04 (Noble), from the PPA:
+
+```sh
+sudo add-apt-repository ppa:wrouesnel/ks3fs
+sudo apt install ks3fs-dkms
+```
+
+DKMS builds the module for the running and newest kernels on install, and
+for each new kernel after that.
+
 ## Building
 
 ```sh
 make -C src                            # running kernel
 make -C src KDIR=/path/to/headers CC=x86_64-linux-gnu-gcc-13
 packaging/build-deb.sh                 # -> build/deb/ks3fs-dkms_<ver>_all.deb
+packaging/build-source.sh dist noble   # unsigned source package, as for the PPA
 ```
 
-`dkms.conf` builds `src/` for every installed kernel. The `.deb` registers the
-module with DKMS on install and removes it on uninstall.
+The packaging is in `debian/` (debhelper with `dh-dkms`); `build-deb.sh`
+builds the binary package from it out of the working tree (needs `debhelper`
+and `dh-dkms`).
+
+## Releasing
+
+1. Bump `PACKAGE_VERSION` in `dkms.conf` and add a `debian/changelog` entry
+   (`dch -v <ver>-1`) with the same upstream version.
+2. Once CI is green on that commit, tag it `v<ver>` and push the tag.
+3. The **ppa** workflow builds a signed source package per series in
+   `SERIES` (`<ver>-1~noble1`, ...) and uploads it to `ppa:wrouesnel/ks3fs`;
+   Launchpad builds the packages. Run it by hand from the Actions tab to
+   build and sign without uploading.
+
+The upload key is a signing key used only by CI, registered on Launchpad; it
+and its passphrase are the `PPA_GPG_PRIVATE_KEY` and `PPA_GPG_PASSPHRASE`
+repository secrets.
 
 ## Testing
 
@@ -328,8 +356,10 @@ three is what caught the servers that ignore `encoding-type=url`.
   (weekly and on demand only).
 - **mainline** builds and VM-tests the newest mainline kernel (release or
   -rc) as an early warning for VFS API drift. Its failures don't fail CI.
-- **dkms** installs the `.deb` into a clean Noble container with headers for
-  every matrix kernel.
+- **dkms** builds the package from `debian/`, installs it into a clean Noble
+  container with headers for every matrix kernel, and builds the source
+  package.
+- **ppa** (separate workflow) uploads release tags to the Launchpad PPA.
 
 A weekly schedule picks up new kernel ABIs.
 
