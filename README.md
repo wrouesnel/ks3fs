@@ -233,9 +233,15 @@ and `dh-dkms`).
    Launchpad builds the packages. Run it by hand from the Actions tab to
    build and sign without uploading.
 
-The upload key is a signing key used only by CI, registered on Launchpad; it
-and its passphrase are the `PPA_GPG_PRIVATE_KEY` and `PPA_GPG_PASSPHRASE`
-repository secrets.
+The upload key is a signing key used only by CI, registered on Launchpad:
+
+    54E3 4439 8C87 82B1 EB60  767B 6576 48BA 04CD D7C7
+    Will Rouesnel (ks3fs PPA uploads from GitHub Actions) <wrouesnel@wrouesnel.com>
+
+It lives in the maintainer's GPG keyring, with its passphrase in the login
+keyring (`secret-tool lookup service ks3fs-ppa key
+54E344398C8782B1EB60767B657648BA04CDD7C7`). CI has a copy as the
+`PPA_GPG_PRIVATE_KEY` and `PPA_GPG_PASSPHRASE` repository secrets.
 
 ## Testing
 
