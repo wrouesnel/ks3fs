@@ -184,7 +184,9 @@ ctl "cut?dir=down&bytes=200000&count=3&port=$FP_TLS"
 drop_caches
 eq "TLS read survives mid-record disconnects" "$(bigsha $M2/big.bin)" "$BIG_SHA"
 c1=$(cuts)
-check "the proxy really cut TLS connections ($c0 -> $c1)" test "$c1" -ge $((c0 + 3))
+# the read is the assertion; this only proves faults were injected (a
+# server closing every connection may leave a budget unused at the end)
+check "the proxy really cut TLS connections ($c0 -> $c1)" test "$c1" -ge $((c0 + 1))
 ctl uncut	# budgets not used must not cut later tests
 
 check "umount all" sh -c "umount $M && umount $M2 && umount $M3"
