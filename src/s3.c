@@ -462,6 +462,7 @@ static int s3_copy(struct ks3fs_sb_info *sbi, const char *src,
 		.method = "PUT", .key = dst,
 		/* without a replacement the source's metadata is copied */
 		.meta = meta, .meta_replace = meta != NULL,
+		.slow = true,	/* up to 5 GiB copied before the answer */
 	};
 	struct ks3fs_resp resp;
 	char *enc, *source, *body = NULL;

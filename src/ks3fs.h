@@ -25,6 +25,7 @@
 #define KS3FS_MAX_PUT		(5ULL << 30)	/* single PUT/COPY limit */
 #define KS3FS_MPU_MAX_PARTS	10000
 #define KS3FS_MAX_OBJECT	(5ULL << 40)	/* S3 object size limit */
+#define KS3FS_SLOW_TIMEOUT	(15 * 60 * HZ)	/* see ks3fs_req.slow */
 #define KS3FS_PART_MIN		(5ULL << 20)	/* smallest non-final part */
 #define KS3FS_MAX_XML		(16 << 20)	/* cap on buffered XML bodies */
 #define KS3FS_MAX_DIR_MOVE	100000	/* objects; beyond that mv(1) copies */
@@ -155,6 +156,12 @@ struct ks3fs_attr {
 struct ks3fs_retry {
 	unsigned long start;
 	unsigned int attempt;
+	/*
+	 * Times the request went out (at least in part).  More than one
+	 * means the server may have acted on an earlier copy, even when no
+	 * backoff happened (a dead keep-alive connection is retried at once).
+	 */
+	unsigned int sent;
 };
 
 void ks3fs_retry_init(struct ks3fs_retry *r);
@@ -178,6 +185,12 @@ struct ks3fs_req {
 	const struct ks3fs_meta *meta;	/* sent as x-amz-meta-* */
 	bool meta_replace;	/* CopyObject: x-amz-metadata-directive: REPLACE */
 	bool want_xattr;	/* response: keep x-amz-meta-xattr */
+	/*
+	 * The server works before it answers (CompleteMultipartUpload and
+	 * server-side copies can take minutes): wait up to KS3FS_SLOW_TIMEOUT
+	 * for the response rather than the mount's timeout=.
+	 */
+	bool slow;
 	const char *if_match;
 	const char *range;	/* "bytes=a-b" */
 	loff_t body_len;
@@ -327,7 +340,7 @@ int ks3fs_mpu_copy_part(struct ks3fs_sb_info *sbi, const char *key,
 			char *etag_out);
 int ks3fs_mpu_complete(struct ks3fs_sb_info *sbi, const char *key,
 		       const char *upload_id, char (*etags)[KS3FS_ETAG_LEN],
-		       int nr, char *etag_out);
+		       int nr, loff_t size, char *etag_out);
 void ks3fs_mpu_abort(struct ks3fs_sb_info *sbi, const char *key,
 		     const char *upload_id);
 int ks3fs_mpu_copy_parts(struct ks3fs_sb_info *sbi, const char *key,

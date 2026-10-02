@@ -128,7 +128,7 @@ int ks3fs_mpu_copy_part(struct ks3fs_sb_info *sbi, const char *key,
 	};
 	struct ks3fs_req req = {
 		.method = "PUT", .key = key, .params = params, .nr_params = 2,
-		.copy_range = range, .copy_if_match = if_match,
+		.copy_range = range, .copy_if_match = if_match, .slow = true,
 	};
 	struct ks3fs_resp resp;
 	char *body = NULL;
@@ -151,13 +151,50 @@ int ks3fs_mpu_copy_part(struct ks3fs_sb_info *sbi, const char *key,
 	return err;
 }
 
+/*
+ * After a retried completion: is the object there, with the size the
+ * upload makes?  A server can answer the retry while it is still putting
+ * the object together from the first attempt (versitygw does), so wait
+ * for it rather than take the answer on trust.
+ */
+static int mpu_verify(struct ks3fs_sb_info *sbi, const char *key,
+		      loff_t size, char *etag_out)
+{
+	unsigned long deadline = jiffies + KS3FS_SLOW_TIMEOUT;
+	struct ks3fs_attr attr;
+	int err;
+
+	for (;;) {
+		err = ks3fs_s3_head(sbi, key, &attr);
+		if (!err && attr.size == size) {
+			strscpy(etag_out, attr.etag, KS3FS_ETAG_LEN);
+			return 0;
+		}
+		if (err && err != -ENOENT)
+			return err;
+		if (time_after(jiffies, deadline)) {
+			pr_warn_ratelimited("ks3fs: '%s' is still not %lld bytes after completing its upload\n",
+					    key, size);
+			return -EIO;
+		}
+		if (schedule_timeout_killable(HZ))
+			return -EINTR;
+	}
+}
+
 int ks3fs_mpu_complete(struct ks3fs_sb_info *sbi, const char *key,
 		       const char *upload_id, char (*etags)[KS3FS_ETAG_LEN],
-		       int nr, char *etag_out)
+		       int nr, loff_t size, char *etag_out)
 {
 	struct ks3fs_param p = { "uploadId", upload_id };
 	struct ks3fs_req req = {
 		.method = "POST", .key = key, .params = &p, .nr_params = 1,
+		/*
+		 * the server assembles the object first; a retry while it is
+		 * still at it may be answered at once (versitygw) before the
+		 * object exists
+		 */
+		.slow = true,
 	};
 	struct ks3fs_retry r;
 	struct ks3fs_resp resp;
@@ -186,16 +223,17 @@ int ks3fs_mpu_complete(struct ks3fs_sb_info *sbi, const char *key,
 	 * If an earlier attempt completed the upload but its response was
 	 * lost, the retry finds no such upload: the object is already there.
 	 */
-	if (resp.status == 404 && r.attempt && body &&
+	if (resp.status == 404 && r.sent > 1 && body &&
 	    strnstr(body, "NoSuchUpload", len)) {
-		etag_out[0] = '\0';
 		kvfree(body);
-		return 0;
+		return mpu_verify(sbi, key, size, etag_out);
 	}
 	err = mpu_status("CompleteMultipartUpload", key, &resp, body, len);
 	if (!err && ks3fs_xml_get(body, len, "ETag", etag_out, KS3FS_ETAG_LEN))
 		etag_out[0] = '\0';
 	kvfree(body);
+	if (!err && r.sent > 1)
+		err = mpu_verify(sbi, key, size, etag_out);
 	return err;
 }
 
@@ -341,7 +379,8 @@ int ks3fs_s3_copy_large(struct ks3fs_sb_info *sbi, const char *src,
 	err = ks3fs_mpu_copy_parts(sbi, dst, id, src, NULL, part, size, idx,
 				   nr, etags);
 	if (!err)
-		err = ks3fs_mpu_complete(sbi, dst, id, etags, nr, etag_out);
+		err = ks3fs_mpu_complete(sbi, dst, id, etags, nr, size,
+					 etag_out);
 	if (err && id)
 		ks3fs_mpu_abort(sbi, dst, id);
 out:

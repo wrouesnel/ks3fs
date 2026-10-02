@@ -51,6 +51,7 @@ void ks3fs_retry_init(struct ks3fs_retry *r)
 {
 	r->start = jiffies;
 	r->attempt = 0;
+	r->sent = 0;
 }
 
 static bool retryable_err(int err)
@@ -677,11 +678,17 @@ struct ks3fs_conn *ks3fs_http_start(struct ks3fs_sb_info *sbi,
 		}
 		reused = conn->reused;
 
+		r->sent++;
 		err = ks3fs_http_send(conn, head, headlen);
 		if (!err && send_body)
 			err = send_body(conn, body_arg);
+		if (!err && req->slow)
+			conn->sock->sk->sk_rcvtimeo = max(sbi->timeout,
+							  (unsigned long)KS3FS_SLOW_TIMEOUT);
 		if (!err)
 			err = read_resp_head(conn, resp, &got_any);
+		if (req->slow && conn->sock)
+			conn->sock->sk->sk_rcvtimeo = sbi->timeout;
 		if (!err) {
 			if (retryable_status(resp->status) &&
 			    retry_allowed(sbi, r, -EAGAIN)) {

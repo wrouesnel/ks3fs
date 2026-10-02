@@ -849,7 +849,7 @@ out:
 	if (err)
 		return err;
 	err = ks3fs_mpu_complete(sbi, mpu->key, mpu->upload_id, mpu->etags, nr,
-				 etag);
+				 size, etag);
 	if (err)
 		return err;
 
