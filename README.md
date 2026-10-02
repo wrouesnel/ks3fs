@@ -203,7 +203,7 @@ options:
 On Ubuntu 24.04 (Noble), from the PPA:
 
 ```sh
-sudo add-apt-repository ppa:wrouesnel/ks3fs
+sudo add-apt-repository ppa:w-rouesnel/ks3fs
 sudo apt install ks3fs-dkms
 ```
 
@@ -229,7 +229,7 @@ and `dh-dkms`).
    (`dch -v <ver>-1`) with the same upstream version.
 2. Once CI is green on that commit, tag it `v<ver>` and push the tag.
 3. The **ppa** workflow builds a signed source package per series in
-   `SERIES` (`<ver>-1~noble1`, ...) and uploads it to `ppa:wrouesnel/ks3fs`;
+   `SERIES` (`<ver>-1~noble1`, ...) and uploads it to `ppa:w-rouesnel/ks3fs`;
    Launchpad builds the packages. Run it by hand from the Actions tab to
    build and sign without uploading.
 

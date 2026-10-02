@@ -17,7 +17,7 @@ permissions:
   contents: read
 
 env:
-  PPA: ppa:wrouesnel/ks3fs
+  PPA: ppa:w-rouesnel/ks3fs
   # Ubuntu series to build for, each as <version>-<rev>~<series>1
   SERIES: noble
 
