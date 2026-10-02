@@ -39,24 +39,23 @@ jobs:
             echo "::error::tag $GITHUB_REF_NAME but debian/changelog is $version"; exit 1; }
       - name: Import the signing key
         env:
-          PPA_GPG_PRIVATE_KEY: ${{ secrets.PPA_GPG_PRIVATE_KEY }}
-          PPA_GPG_PASSPHRASE: ${{ secrets.PPA_GPG_PASSPHRASE }}
+          PACKAGE_SIGNING_KEY: ${{ secrets.PACKAGE_SIGNING_KEY }}
+          PACKAGE_SIGNING_KEY_PASSPHRASE: ${{ secrets.PACKAGE_SIGNING_KEY_PASSPHRASE }}
+          FPR: ${{ vars.PACKAGE_SIGNING_KEY_FINGERPRINT }}
         run: |
-          [ -n "$PPA_GPG_PRIVATE_KEY" ] || { echo "::error::PPA_GPG_PRIVATE_KEY is not set"; exit 1; }
-          gpg --batch --import <<<"$PPA_GPG_PRIVATE_KEY"
-          keyid=$(gpg --list-secret-keys --with-colons | awk -F: '/^fpr/ {print $10; exit}')
-          echo "KEYID=$keyid" >> "$GITHUB_ENV"
-          umask 077
-          printf '%s' "$PPA_GPG_PASSPHRASE" > "$RUNNER_TEMP/passphrase"
-          # debsign calls this instead of gpg: no pinentry on a runner
-          cat > "$RUNNER_TEMP/gpg-sign" <<SH
-          #!/bin/sh
-          exec gpg --batch --pinentry-mode loopback --passphrase-file "$RUNNER_TEMP/passphrase" "\$@"
-          SH
-          chmod 755 "$RUNNER_TEMP/gpg-sign"
+          [ -n "$PACKAGE_SIGNING_KEY" ] && [ -n "$FPR" ] ||
+            { echo "::error::PACKAGE_SIGNING_KEY or PACKAGE_SIGNING_KEY_FINGERPRINT is not set"; exit 1; }
+          gpg --batch --import <<<"$PACKAGE_SIGNING_KEY"
+          gpg --list-secret-keys "$FPR" >/dev/null
+          # hand the passphrase to gpg-agent over stdin (no file, no pinentry
+          # on a runner): signing then needs no passphrase at all
+          echo allow-preset-passphrase >> ~/.gnupg/gpg-agent.conf
+          gpgconf --kill gpg-agent
+          for grip in $(gpg --with-keygrip --with-colons -K "$FPR" | awk -F: '/^grp/ {print $10}'); do
+            /usr/lib/gnupg/gpg-preset-passphrase --preset "$grip" <<<"$PACKAGE_SIGNING_KEY_PASSPHRASE"
+          done
+          echo "KEYID=$FPR" >> "$GITHUB_ENV"
       - name: Build signed source packages
-        env:
-          SIGN_COMMAND: ${{ runner.temp }}/gpg-sign
         run: |
           # shellcheck disable=SC2086
           packaging/build-source.sh -k "$KEYID" dist $SERIES
