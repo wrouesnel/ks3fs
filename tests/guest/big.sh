@@ -5,7 +5,9 @@ SUITE=big
 . /tests/lib.sh
 M=/mnt/big
 M2=/mnt/big2
-OPTS="addr=10.0.2.2,port=$S3_PORT,access_key=$S3_AK,secret_key=$S3_SK"
+# timeout=5: completing a 6 GiB upload (or copying it) takes the server far
+# longer, and must not be cut short by the per-request timeout
+OPTS="addr=10.0.2.2,port=$S3_PORT,access_key=$S3_AK,secret_key=$S3_SK,timeout=5"
 psha() { sh -c "$1" | sha256sum | cut -d' ' -f1; }
 mkdir -p $M $M2
 check "mount" mount -t ks3fs -o $OPTS $S3_BUCKET $M

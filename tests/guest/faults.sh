@@ -189,5 +189,23 @@ c1=$(cuts)
 check "the proxy really cut TLS connections ($c0 -> $c1)" test "$c1" -ge $((c0 + 1))
 ctl uncut	# budgets not used must not cut later tests
 
+# ---- a multipart completion whose answer is lost: retried, then checked
+# (a server may answer the retry before the object exists)
+dd if=/dev/urandom of=/tmp/mpu.bin bs=1M count=12 2>/dev/null
+mkdir -p /mnt/f4
+mount -t ks3fs -o $P,part_size=5,retry_timeout=120 ks3test /mnt/f4
+c0=$(cuts)
+# only CompleteMultipartUpload is a POST with ?uploadId= (parts are PUTs)
+ctl "cutreq?match=POST%20/ks3test/late.bin%3FuploadId%3D&count=1"
+check "multipart upload whose completion answer is lost" cp /tmp/mpu.bin /mnt/f4/late.bin
+c1=$(cuts)
+check "the completion's answer really was cut ($c0 -> $c1)" test "$c1" -ge $((c0 + 1))
+ctl uncut
+umount /mnt/f4
+mount -t ks3fs -o addr=10.0.2.2,port=$S3_PORT,$CREDS ks3test /mnt/fref
+eq "stored object complete" "$(sha /mnt/fref/late.bin)" "$(sha /tmp/mpu.bin)"
+rm -f /mnt/fref/late.bin
+umount /mnt/fref
+
 check "umount all" sh -c "umount $M && umount $M2 && umount $M3"
 finish

@@ -17,6 +17,8 @@ with busybox wget:
                                   its budget on (servers that close after every
                                   response, like versitygw, still get K cuts)
   GET /uncut                      drop the cut budgets not used yet
+  GET /cutreq?match=S&count=K     cut the answer to each of the next K requests
+                                  whose request line contains S (plain HTTP)
   GET /slow?bps=N                 throttle server->client to N bytes/s (0=off)
   GET /delay?ms=N                 add N ms before each server->client read
   GET /stats                      JSON counters
@@ -33,7 +35,7 @@ import struct
 import sys
 import urllib.parse
 
-state = {"mode": "normal", "bps": 0, "delay": 0.0}
+state = {"mode": "normal", "bps": 0, "delay": 0.0, "cutreq": None}
 cuts = {"down": [], "up": []}     # queued (bytes, port) budgets for new connections
 stats = {"conns": 0, "resets": 0, "cuts": 0, "bytes_down": 0, "bytes_up": 0}
 active = {}                       # conn -> {"down": budget|None, "up": ...}
@@ -65,6 +67,13 @@ async def pump(reader, writer, direction, conn):
                 await asyncio.sleep(state["delay"])     # one-way latency
             while state["mode"] == "blackhole":
                 await asyncio.sleep(0.05)
+            req = state["cutreq"]
+            if direction == "up" and req and req["count"] > 0:
+                line = data.split(b"\r\n", 1)[0]
+                if req["match"] in line and conn in active:
+                    req["count"] -= 1
+                    # its answer gets cut right after the first byte
+                    active[conn]["down"] = [1, 1, None, False]
             budget = active.get(conn, {}).get(direction)
             if budget is not None:
                 if len(data) >= budget[0]:
@@ -175,9 +184,13 @@ async def control(reader, writer, listen, upstream):
                     budgets[d] = [n, n, port, False]
                     k -= 1
             cuts[d] += [(n, port)] * k
+        elif url.path == "/cutreq":
+            state["cutreq"] = {"match": q["match"].encode(),
+                               "count": int(q.get("count", 1))}
         elif url.path == "/uncut":
             cuts["down"].clear()
             cuts["up"].clear()
+            state["cutreq"] = None
             for budgets in active.values():
                 budgets["down"] = budgets["up"] = None
         elif url.path == "/delay":
