@@ -941,4 +941,4 @@ module_init(ks3fs_init);
 module_exit(ks3fs_exit);
 MODULE_DESCRIPTION("In-kernel S3 object store filesystem");
 MODULE_LICENSE("GPL");
-MODULE_VERSION("0.3.0");
+MODULE_VERSION("0.3.1");

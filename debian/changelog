@@ -1,3 +1,10 @@
+ks3fs (0.3.1-1) noble; urgency=medium
+
+  * Packaging only: source uploads are signed with the shared Launchpad
+    key.
+
+ -- Will Rouesnel <wrouesnel@wrouesnel.com>  Sat, 03 Oct 2026 11:13:44 +1000
+
 ks3fs (0.3.0-1) noble; urgency=medium
 
   * Initial release: in-kernel S3 filesystem as a DKMS module, with TLS,
