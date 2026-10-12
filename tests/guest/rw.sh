@@ -350,6 +350,42 @@ rm $M2/ext.txt
 sleep 2
 fails "external delete visible after ttl" cat $M/ext.txt
 
+# ---- request counters in /proc/self/mountstats
+# stat_of MOUNT NAME: one counter ("get", "tier1", "4xx", "sent", ...) of that mount
+stat_of() {
+	awk -v mnt="$1" -v key="$2" '
+		$0 ~ (" mounted on " mnt " with fstype ks3fs") { f = 1; next }
+		/^device / { f = 0 }
+		f && /^\t(requests|billing|responses|bytes):/ {
+			for (i = 2; i < NF; i += 2) if ($i == key) print $(i + 1)
+		}' /proc/self/mountstats
+}
+# stats_sum MOUNT SECTION: the sum of one line's counters ("requests", "billing")
+stats_sum() {
+	awk -v mnt="$1" -v sec="$2" '
+		$0 ~ (" mounted on " mnt " with fstype ks3fs") { f = 1; next }
+		/^device / { f = 0 }
+		f && $1 == sec ":" { for (i = 3; i <= NF; i += 2) n += $i }
+		END { print n + 0 }' /proc/self/mountstats
+}
+check "mountstats has ks3fs counters" sh -c "grep -A2 ' mounted on $M with fstype ks3fs' /proc/self/mountstats | grep -q 'ks3fs-stats-version: 1'"
+g0=$(stat_of $M get); p0=$(stat_of $M put); d0=$(stat_of $M delete); l0=$(stat_of $M list)
+drop_caches
+cat $M/hello.txt >/dev/null
+check "a cold read counts a GET" test "$(stat_of $M get)" -gt "$g0"
+echo counted > $M/stats.txt
+check "a write counts a PUT" test "$(stat_of $M put)" -gt "$p0"
+rm $M/stats.txt
+check "an unlink counts a DELETE" test "$(stat_of $M delete)" -gt "$d0"
+drop_caches
+ls $M/dir1/sub >/dev/null
+check "a cold listing counts a LIST" test "$(stat_of $M list)" -gt "$l0"
+req_sum=$(stats_sum $M requests); bill_sum=$(stats_sum $M billing)
+check "requests are counted" test "$req_sum" -gt 0
+eq "billing tiers cover every request" "$bill_sum" "$req_sum"
+check "bytes sent are counted" test "$(stat_of $M sent)" -gt 0
+check "bytes received are counted" test "$(stat_of $M received)" -gt 0
+
 # ---- persistence across remount
 check "umount" umount $M
 check "remount" mount -t ks3fs -o $OPTS $B $M

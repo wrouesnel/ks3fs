@@ -34,6 +34,7 @@
 
 struct ks3fs_conn {
 	struct list_head list;
+	struct ks3fs_sb_info *sbi;	/* for the byte counters */
 	struct socket *sock;
 	struct file *file;	/* TLS sockets need one for the handshake upcall */
 	bool tls;
@@ -187,6 +188,7 @@ static struct ks3fs_conn *conn_new(struct ks3fs_sb_info *sbi)
 	conn = kzalloc(sizeof(*conn), GFP_NOFS);
 	if (!conn)
 		return ERR_PTR(-ENOMEM);
+	conn->sbi = sbi;
 	conn->rbuf = kmalloc(RBUF_SIZE, GFP_NOFS);
 	if (!conn->rbuf) {
 		kfree(conn);
@@ -310,6 +312,7 @@ int ks3fs_http_send(struct ks3fs_conn *conn, const void *buf, size_t len)
 			err = n ? sock_errno(n) : -EPIPE;
 			break;
 		}
+		atomic64_add(n, &conn->sbi->stats.bytes_sent);
 		buf += n;
 		len -= n;
 	}
@@ -335,6 +338,8 @@ static int conn_recv(struct ks3fs_conn *conn, void *buf, size_t len)
 	restore_signals(&old);
 	if (n <= 0)
 		conn->broken = true;
+	else
+		atomic64_add(n, &conn->sbi->stats.bytes_recv);
 	return n < 0 ? sock_errno(n) : n;
 }
 
@@ -679,6 +684,7 @@ struct ks3fs_conn *ks3fs_http_start(struct ks3fs_sb_info *sbi,
 		reused = conn->reused;
 
 		r->sent++;
+		ks3fs_stats_request(sbi, req);
 		err = ks3fs_http_send(conn, head, headlen);
 		if (!err && send_body)
 			err = send_body(conn, body_arg);
@@ -687,6 +693,7 @@ struct ks3fs_conn *ks3fs_http_start(struct ks3fs_sb_info *sbi,
 							  (unsigned long)KS3FS_SLOW_TIMEOUT);
 		if (!err)
 			err = read_resp_head(conn, resp, &got_any);
+		ks3fs_stats_response(sbi, err ? 0 : resp->status, err);
 		if (req->slow && conn->sock)
 			conn->sock->sk->sk_rcvtimeo = sbi->timeout;
 		if (!err) {

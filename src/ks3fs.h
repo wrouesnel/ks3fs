@@ -15,6 +15,7 @@
 #include <linux/list.h>
 #include <linux/time64.h>
 #include <linux/uidgid.h>
+#include <linux/atomic.h>
 #include <linux/workqueue.h>
 
 #include "compat.h"
@@ -34,6 +35,25 @@
 /* ---------- mount-wide state ---------- */
 
 struct ks3fs_conn;
+
+/* ---------- request counters (stats.c) ---------- */
+
+enum ks3fs_op {
+	KS3_OP_GET, KS3_OP_HEAD, KS3_OP_LIST, KS3_OP_PUT, KS3_OP_PUT_PART,
+	KS3_OP_COPY, KS3_OP_COPY_PART, KS3_OP_MPU_CREATE, KS3_OP_MPU_COMPLETE,
+	KS3_OP_DELETE, KS3_OP_MPU_ABORT, KS3_OP_OTHER, KS3_OP_MAX
+};
+
+enum ks3fs_resp_class {
+	KS3_RESP_2XX, KS3_RESP_3XX, KS3_RESP_4XX, KS3_RESP_5XX,
+	KS3_RESP_TRANSPORT, KS3_RESP_MAX
+};
+
+struct ks3fs_stats {
+	atomic64_t req[KS3_OP_MAX];	/* attempts sent, retries included */
+	atomic64_t resp[KS3_RESP_MAX];
+	atomic64_t bytes_sent, bytes_recv;	/* on the wire */
+};
 
 struct ks3fs_sb_info {
 	/* endpoint */
@@ -80,6 +100,8 @@ struct ks3fs_sb_info {
 	/* lazy metadata writeback (see super.c) */
 	struct super_block *sb;
 	struct delayed_work meta_work;
+
+	struct ks3fs_stats stats;
 };
 
 #define KS3FS_META_DELAY	(5 * HZ)
@@ -222,6 +244,13 @@ struct ks3fs_conn *ks3fs_http_start(struct ks3fs_sb_info *sbi,
 				    int (*send_body)(struct ks3fs_conn *, void *),
 				    void *body_arg, struct ks3fs_retry *r);
 int ks3fs_http_send(struct ks3fs_conn *conn, const void *buf, size_t len);
+
+/* stats.c */
+struct ks3fs_req;
+struct seq_file;
+void ks3fs_stats_request(struct ks3fs_sb_info *sbi, const struct ks3fs_req *req);
+void ks3fs_stats_response(struct ks3fs_sb_info *sbi, int status, int err);
+int ks3fs_show_stats(struct seq_file *m, struct dentry *root);
 ssize_t ks3fs_http_read_body(struct ks3fs_conn *conn, struct ks3fs_resp *resp,
 			     void *buf, size_t len);
 void ks3fs_http_finish(struct ks3fs_sb_info *sbi, struct ks3fs_conn *conn,

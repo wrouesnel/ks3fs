@@ -479,6 +479,7 @@ static const struct super_operations ks3fs_sops = {
 	.evict_inode	= ks3fs_evict_inode,
 	.statfs		= ks3fs_statfs,
 	.show_options	= ks3fs_show_options,
+	.show_stats	= ks3fs_show_stats,
 	.drop_inode	= ks3fs_drop_inode,
 	.write_inode	= ks3fs_write_inode,	/* nothing to keep uncached */
 };
