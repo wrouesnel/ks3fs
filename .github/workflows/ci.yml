@@ -110,7 +110,7 @@ jobs:
         env:
           S3_SERVER: ${{ matrix.server }}
           # AWS-dependent suites need only run once per kernel
-          SUITES: ${{ matrix.server == 'minio' && 'rw rw-tls tls faults keys nix' || 'rw rw-tls faults keys' }}
+          SUITES: ${{ matrix.server == 'minio' && 'rw rw-tls deferred tls faults keys nix' || 'rw rw-tls deferred faults keys' }}
         run: |
           sudo apt-get install -y -qq "gcc-$(vm/fetch-kernel.sh ${{ matrix.kver }} --headers >/dev/null;
             sed -n 's/^CONFIG_CC_VERSION_TEXT="x86_64-linux-gnu-gcc-\([0-9]*\) .*/\1/p' \
@@ -318,7 +318,7 @@ jobs:
       - name: Build and test on ${{ env.KVER }}
         env:
           S3_SERVER: versitygw
-          SUITES: rw rw-tls tls faults
+          SUITES: rw rw-tls deferred tls faults
         run: tests/run.sh "$KVER"
       - uses: actions/upload-artifact@v7
         if: always()

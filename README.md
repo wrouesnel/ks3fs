@@ -48,16 +48,25 @@ No maintained in-kernel S3 filesystem was found.
   window (4 MiB by default). Every GET carries `If-Match: <etag>`, so the cache
   never mixes two versions of an object.
 - **Writes** are buffered in the page cache. Partial overwrites
-  read-modify-write from the store. `create` PUTs an empty object immediately,
-  so a file is visible to other clients and permission errors appear at `open`.
+  read-modify-write from the store.
+  - A new file has no object until its first upload (`lazy_create`), so
+    creating and writing a file costs one PUT, not an empty PUT followed by
+    the data. Until then it exists only on this mount. `readdir` and `rmdir`
+    count it, and renaming or unlinking it costs no request.
+  - The last close of a written file queues its upload for `upload_delay_ms`
+    (default 5 s). A chmod, chown, utimes or xattr change made in that time
+    goes out with the data instead of as a CopyObject afterwards. `cp -p`,
+    `tar` and Nix all set modes and times after closing. `fsync` uploads
+    at once. `sync`, `syncfs` and unmount upload everything queued. Due
+    uploads go out `parallel=` at a time.
   - A file smaller than two parts (`part_size`, default 16 MiB) is stored with
-    one PUT on `close()`/`fsync()`.
+    one PUT.
   - Larger files use a multipart upload. Each completed part behind the write
     cursor is uploaded while the file is still being written, and its folios
     become clean and reclaimable. Dirty memory therefore stays at about one
     part per file however big the file gets, and the upload is mostly done by
     close time.
-  - `close()`/`fsync()` completes the upload. Parts the writer never touched
+  - The upload (or `fsync()`) completes the multipart upload. Parts the writer never touched
     are copied server-side from the previous object version (UploadPartCopy,
     run in parallel), so appending to or patching a 6 GiB object doesn't
     resend it.
@@ -67,7 +76,7 @@ No maintained in-kernel S3 filesystem was found.
     Objects can be up to `part_size` × 10,000 (160 GiB by default, 5 TiB
     maximum).
 - **Rename** of a file is a copy followed by DELETE; objects over 5 GiB use a
-  multipart copy.
+  multipart copy. A file that isn't stored yet just takes the new name.
 - **Unlink while open** ("silly rename", as NFS does). An object that is
   unlinked or renamed over while a file has it open is moved to a hidden
   `.ks3fs-orphans/` prefix at the mount root. It is deleted at the last
@@ -77,7 +86,7 @@ No maintained in-kernel S3 filesystem was found.
   (up to `parallel=`). At 20 ms latency, a 20 MB read takes 1.4 s instead
   of 6.8 s.
 - **Directory rename** has no S3 equivalent, so it happens in stages:
-  1. Pending metadata below the directory is stored first.
+  1. Queued uploads and pending metadata below the directory are stored first.
   2. Every object below the directory is copied to the new prefix, in
      parallel (`parallel=`, default 16). If a copy fails, the copies are
      deleted and the rename fails.
@@ -88,14 +97,23 @@ No maintained in-kernel S3 filesystem was found.
   If a file below is open with unsaved data, or the tree holds more than
   100,000 objects, the rename returns `EXDEV` and `mv` falls back to copying.
   The rename isn't atomic: other clients can see both trees while it runs.
-- **Consistency.** Close-to-open. Dentries and attributes are trusted for
+- **Consistency.** Close-to-open, `upload_delay_ms` after the close (set it
+  to 0 for strict close-to-open). Dentries and attributes are trusted for
   `ttl` seconds (default 1). After that, the next path walk re-HEADs, and a
-  changed ETag invalidates the cached pages. With `nometa`, `readdir`
+  changed ETag invalidates the cached pages.
+- **Lookups in directories this mount made.** Each name ks3fs looks up and
+  doesn't find costs a HEAD and a LIST (to rule out an implicit directory).
+  A directory created by `mkdir` on this mount holds only what this mount put
+  there, and all of that is in the dcache. So for `own_dir_ttl` seconds
+  (default 60) after the `mkdir`, a name missing from it is taken to be absent
+  without a request. Writing a tree of new files then costs no lookups. Once
+  any entry of the directory is dropped from the dcache (memory pressure), or
+  turns out to be gone or replaced on the server, lookups ask the store again. With `nometa`, `readdir`
   instantiates dentries from the listing, the way NFS READDIRPLUS does, so
   `ls -l` costs one LIST.
 - **Metadata listings.** With metadata on, a listing can't say which objects
   are symlinks or what their modes are. Readdir therefore keeps its listing
-  for 10 s. The first stat of one of its entries (`ls -l`, `find`) HEADs all
+  for `readdir_window_ms` (default 10 s). The first stat of one of its entries (`ls -l`, `find`) HEADs all
   of them in parallel and instantiates their dentries, so the rest of the
   stats are served from cache. At 20 ms latency, `ls -l` of 200 files takes
   1 s instead of 4 s.
@@ -103,9 +121,10 @@ No maintained in-kernel S3 filesystem was found.
   type), uid, gid and mtime are stored as `x-amz-meta-mode/uid/gid/mtime`,
   the layout s3fs-fuse and rclone use, so buckets stay interoperable.
   - Symlinks are objects whose body is the target; `mode` says `S_IFLNK`.
-  - chmod, chown and utimes are written back lazily by the VFS (`->write_inode`
-    on writeback, `sync` or `fsync`) as one CopyObject onto the object itself,
-    so a chmod followed by a utimes costs one request.
+  - chmod, chown and utimes are written back lazily (`meta_delay_ms`, default
+    5 s, or at `sync`/`fsync`) as one CopyObject onto the object itself, so a
+    chmod followed by a utimes costs one request. If the file's data hasn't
+    been uploaded yet, the changes go with the upload instead.
   - Directory modes live on the `dir/` marker object; one is created when an
     implicit directory is chmod-ed.
 - **TLS** (`tls`). This is the NFS-over-TLS design. The kernel asks the
@@ -167,6 +186,22 @@ options:
 | `parallel=` | concurrent requests for readahead, directory renames, prefetch and part copies (default 16) |
 | `creds_key=NAME` | read credentials from the "logon" key `ks3fs:NAME` in the kernel keyring instead of mount options: `access_key`, `secret_key` and an optional `session_token` on separate lines. Re-read for every request, so `keyctl update` rotates credentials without a remount. `mount.ks3fs` uses this automatically for `credentials=` files when `keyctl` is installed. |
 
+Module parameters apply to every mount and can be changed at any time, in
+`/sys/module/ks3fs/parameters/`, with `modprobe ks3fs NAME=VALUE`, or as
+`options ks3fs NAME=VALUE` in `/etc/modprobe.d/`:
+
+| parameter | default | meaning |
+|---|---|---|
+| `own_dir_ttl` | 60 | seconds a directory this mount created answers lookups of names it lacks without a request (0 = off) |
+| `lazy_create` | Y | create a file's object with its first upload rather than with an empty PUT at `open` |
+| `upload_delay_ms` | 5000 | how long after the last close a file's data is uploaded (0 = on close) |
+| `meta_delay_ms` | 5000 | how long before chmod/chown/utimes/xattr changes are written back |
+| `readdir_window_ms` | 10000 | how long a listing is kept to prefetch its entries' attributes |
+
+For strict close-to-open behaviour, with errors reported by `close()`, set
+`upload_delay_ms=0`. To also have a new file show up on other clients at `open`,
+and permission errors appear there, set `lazy_create=N`.
+
 ## Limitations
 
 - TLS needs `tlshd` running. Noble's `tlshd` 0.9 only speaks TLS 1.3 and only
@@ -191,8 +226,16 @@ options:
   them (`x-amz-meta-xattr`). S3's 2 KiB metadata limit caps them at about
   1.9 KiB per object, encoded. ACLs need metadata (they are off with
   `nometa`).
-- Metadata changes reach other clients after writeback (about 5 s to 30 s)
-  or `sync`.
+- Metadata changes reach other clients after writeback (`meta_delay_ms`)
+  or `sync`. With `upload_delay_ms`, so do new data, and `close()` can't
+  report a failed upload: it is logged, and the data stays dirty in memory.
+  Use `fsync` where an error must reach the writer.
+- With `lazy_create`, a file another client creates under the same name
+  before the upload is overwritten by it, and missing write permission
+  shows up at the upload rather than at `open`.
+- `own_dir_ttl` assumes other clients don't add entries to a directory this
+  mount just created. If one does, this mount won't see the new entry until
+  `own_dir_ttl` runs out (or the entries are evicted).
 - `O_DIRECT` is not supported.
 - `fallocate` reserves nothing (objects have no allocation): it extends the
   size, and punching or zeroing a range writes zeros. Collapsing and
@@ -268,6 +311,17 @@ file.
      move across parents, over an empty directory, `ENOTEMPTY`, `EXDEV` when
      busy, and 2,500 objects). And `ls -l` correctness on a fresh mount.
    - `rw-tls` runs the whole of `rw` again over TLS (on its own bucket).
+   - `deferred` checks the request-saving defaults by counting requests in
+     `/proc/self/mountstats`:
+     - creating 20 files in a new directory, then chmod-ing and touching them,
+       costs 20 PUTs and nothing else;
+     - unstored files are listed, stat-ed and counted by `rmdir`, and renaming
+       or unlinking them is free;
+     - `sync`, `fsync` and unmount send queued uploads;
+     - a directory rename stores queued files first;
+     - every module parameter does what it says.
+     The other suites set `upload_delay_ms=0`, as they check files through a
+     second mount right after closing them.
    - `tls` has 22 checks:
      - the certificate is verified;
      - a wrong name or an untrusted CA is rejected;

@@ -15,6 +15,8 @@ mkdir -p /nix/store /nix/var/nix /root /mnt/rel /mnt/src
 export HOME=/root USER=root NIX_SSL_CERT_FILE=/etc/ssl/certs/ca-certificates.crt
 t0=$(date +%s)
 stamp() { echo "# [$(( $(date +%s) - t0 ))s] $*"; }
+# the store mount's request counters so far
+reqs() { grep -A4 " on /nix/store with" /proc/self/mountstats | grep -E 'requests|responses' | sed 's/^[[:space:]]*/#   /'; }
 
 check "mount ks3fs at /nix/store" mount -t ks3fs -o $STORE_OPTS,ttl=30 nixstore /nix/store
 check "mount nix-releases over HTTPS" mount -t ks3fs \
@@ -29,6 +31,7 @@ D=/tmp/nix-$NIX_VERSION-x86_64-linux
 stamp "copying $(ls $D/store | wc -l) store paths into ks3fs"
 check "copy the Nix closure into /nix/store" sh -c "for p in $D/store/*; do cp -a \$p /nix/store/ || exit 1; done"
 stamp "copied"
+reqs
 # the release's own installer names its nix store path
 NIX=$(sed -n 's/^nix="\(.*\)"$/\1/p' $D/install)
 export PATH=$NIX/bin:$PATH
@@ -50,10 +53,12 @@ rm -rf $D
 stamp "substituting stdenv"
 check "substitute stdenv from cache.nixos.org" nix-store -r $STDENV
 stamp "building hello"
+reqs
 check "nix-build GNU hello from source" nix-build /tests/nix/hello.nix \
 	--argstr stdenv $STDENV --argstr shell $STDENV_SHELL \
 	--arg src /mnt/src/hello-src.tar.gz -o /tmp/result
 stamp "built"
+reqs
 eq "the built binary runs" "$(/tmp/result/bin/hello)" "Hello, world!"
 check "hello was really built here" sh -c "nix-store -q --deriver \$(readlink /tmp/result) | grep -q hello-ks3fs"
 eq "store paths are read-only" "$(stat -c %a $(readlink /tmp/result)/bin/hello)" "555"

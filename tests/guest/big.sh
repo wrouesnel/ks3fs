@@ -3,6 +3,7 @@
 # pin the whole file in memory.
 SUITE=big
 . /tests/lib.sh
+close_to_open	# these checks expect a file to be stored by its close
 M=/mnt/big
 M2=/mnt/big2
 # timeout=5: completing a 6 GiB upload (or copying it) takes the server far

@@ -4,7 +4,7 @@
 # suites, then verify from the host what the guest wrote.
 #
 #   tests/run.sh [kver]            (default: 6.8.0-136-generic)
-#   SUITES="rw rw-tls tls faults nix" S3_SERVER=minio|versitygw|rgw tests/run.sh
+#   SUITES="rw rw-tls deferred tls faults nix" S3_SERVER=minio|versitygw|rgw tests/run.sh
 #   SUITES=nixstore tests/run.sh      (Nix store on ks3fs; slow, needs internet)
 #   SUITES=big tests/run.sh           (6 GiB object in a 1 GiB guest; slow)
 #   SUITES=stress tests/run.sh        (xfstests fsx + fsstress)
@@ -14,6 +14,8 @@
 #                                     XFSTESTS_SHARD=i/n runs every n-th
 #                                     quick test from the i-th)
 #                                     (xfstests on an Ubuntu root disk; slow)
+#   KS3_PARAMS="upload_delay_ms=0 lazy_create=N" tests/run.sh
+#                                     (module parameters for every suite)
 #
 # Needs: qemu-system-x86_64, static busybox, aws CLI, curl, gcc and the
 # chosen S3 server (see tests/servers.sh).
@@ -28,7 +30,7 @@ fi
 rm -f "$KS3_RUN_COPY"	# bash already has it open
 ROOT=$(cd "$(dirname "$KS3_RUN_SELF")/.." && pwd)
 KVER=${1:-6.8.0-136-generic}
-SUITES=${SUITES:-rw rw-tls tls faults keys nix}
+SUITES=${SUITES:-rw rw-tls deferred tls faults keys nix}
 OUT=$ROOT/build/out/$KVER
 mkdir -p "$OUT"
 
@@ -41,7 +43,7 @@ cleanup() {
 	rm -rf "${FIXTURES:-}"
 }
 has() { [[ " $SUITES " == *" $1 "* ]]; }
-needs_server() { has rw || has rw-tls || has tls || has faults || has nixstore || has big || has stress || has keys || has xfstests; }
+needs_server() { has rw || has rw-tls || has deferred || has tls || has faults || has nixstore || has big || has stress || has keys || has xfstests; }
 needs_tls() { has rw-tls || has tls || has faults; }
 trap cleanup EXIT
 
@@ -74,6 +76,7 @@ ENVF=$OUT/test.env
 echo "KS3_SUITES=\"$SUITES\"" >>"$ENVF"
 echo "KS3_UNLOAD=1" >>"$ENVF"
 echo "KS3_DEBUG=${KS3_DEBUG:-}" >>"$ENVF"
+echo "KS3_PARAMS=\"${KS3_PARAMS:-}\"" >>"$ENVF"
 echo "TLSHD_LOG_LINES=${TLSHD_LOG_LINES:-20}" >>"$ENVF"
 
 # ---- guest helper binaries (static, kernel independent)

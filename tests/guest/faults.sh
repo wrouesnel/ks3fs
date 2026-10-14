@@ -2,6 +2,7 @@
 # and the S3 server (plus a guest link-down), and signal handling.
 SUITE=faults
 . /tests/lib.sh
+close_to_open	# these checks expect a file to be stored by its close
 ctl() { wget -q -T 10 -O- "http://10.0.2.2:$FP_CTL/$1" >/dev/null; }
 cuts() { wget -q -T 10 -O- "http://10.0.2.2:$FP_CTL/stats" | sed -n 's/.*"cuts": *\([0-9]*\).*/\1/p'; }
 elapsed() { echo $(( $(date +%s) - t0 )); }

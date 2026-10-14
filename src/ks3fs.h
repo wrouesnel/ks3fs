@@ -101,10 +101,26 @@ struct ks3fs_sb_info {
 	struct super_block *sb;
 	struct delayed_work meta_work;
 
+	/* closed files waiting out upload_delay_ms (see file.c) */
+	spinlock_t pending_lock;
+	struct list_head pending;
+	struct delayed_work upload_work;
+
 	struct ks3fs_stats stats;
 };
 
-#define KS3FS_META_DELAY	(5 * HZ)
+/* ---------- tunables (module parameters, see super.c) ---------- */
+
+extern unsigned int ks3fs_own_dir_ttl;
+extern bool ks3fs_lazy_create;
+extern unsigned int ks3fs_upload_delay_ms;
+extern unsigned int ks3fs_meta_delay_ms;
+extern unsigned int ks3fs_readdir_window_ms;
+
+static inline unsigned long ks3fs_ms_param(const unsigned int *p)
+{
+	return msecs_to_jiffies(READ_ONCE(*p));
+}
 
 enum {
 	KS3_SB_OUTAGE,		/* "server not responding" has been logged */
@@ -124,6 +140,7 @@ enum {
 	KS3_I_ORPHAN,		/* unlinked while open: object moved aside */
 	KS3_I_XATTR_KNOWN,	/* @xattr reflects the object's headers */
 	KS3_I_TMPFILE,		/* O_TMPFILE not linked yet: no object */
+	KS3_I_OWN,		/* dir: made by this mount, every entry cached */
 };
 
 struct ks3fs_inode {
@@ -139,6 +156,11 @@ struct ks3fs_inode {
 	atomic_t opens;		/* open files (silly rename on unlink) */
 	struct ks3fs_snap *snap; /* dirs: recent listing, under @lock */
 	char *xattr;		/* x-amz-meta-xattr value or NULL, under @lock */
+	unsigned long own_since; /* dirs: when KS3_I_OWN was set */
+	/* on sbi->pending (under its lock): closed, upload not sent yet */
+	struct list_head pending;
+	unsigned long pending_since;
+	struct dentry *pending_dentry;	/* pinned while on the list */
 };
 
 static inline struct ks3fs_inode *KS3_I(struct inode *inode)
@@ -382,6 +404,10 @@ int ks3fs_s3_copy_large(struct ks3fs_sb_info *sbi, const char *src,
 int ks3fs_s3_list_dir(struct ks3fs_sb_info *sbi, const char *dirkey,
 		      struct ks3fs_listing *out);
 void ks3fs_listing_free(struct ks3fs_listing *l);
+int ks3fs_listing_reserve(struct ks3fs_listing *l, int more);
+int ks3fs_listing_add(struct ks3fs_listing *l, const char *name, size_t len,
+		      bool is_dir, loff_t size, time64_t mtime);
+void ks3fs_listing_sort(struct ks3fs_listing *l);
 int ks3fs_s3_probe(struct ks3fs_sb_info *sbi, const char *dirkey,
 		   bool *has_marker);
 int ks3fs_s3_dir_is_empty(struct ks3fs_sb_info *sbi, const char *dirkey);
@@ -422,6 +448,9 @@ void ks3fs_rekey_subtree(struct super_block *sb, const char *from,
 void ks3fs_schedule_meta_writeback(struct inode *inode);
 char *ks3fs_child_key(struct inode *dir, const struct qstr *name, bool is_dir);
 int ks3fs_upload(struct inode *inode);
+void ks3fs_upload_work(struct work_struct *work);
+void ks3fs_upload_pending(struct ks3fs_sb_info *sbi);
+bool ks3fs_unstored(struct inode *inode);
 int ks3fs_upload_locked(struct inode *inode);
 int ks3fs_orphan(struct inode *inode);
 void ks3fs_orphan_delete(struct inode *inode);

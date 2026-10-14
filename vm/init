@@ -32,6 +32,10 @@ if ! insmod /ks3fs.ko; then
 	echo "insmod failed"
 	rc=1
 else
+	# the tunables' defaults, which lib.sh puts back for each suite
+	for f in /sys/module/ks3fs/parameters/*; do
+		echo "${f##*/} $(cat "$f")"
+	done >/tmp/ks3fs.params
 	for suite in $KS3_SUITES; do
 		echo "=== suite: $suite"
 		sh "/tests/$suite.sh" || rc=1

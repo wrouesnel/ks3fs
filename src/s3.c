@@ -76,6 +76,53 @@ struct list_ctx {
 	int count;		/* raw entries seen, excluding the marker */
 };
 
+static int listing_grow(struct ks3fs_listing *l, int cap)
+{
+	struct ks3fs_list_entry *n;
+
+	if (cap <= l->cap)
+		return 0;
+	n = kvmalloc_array(cap, sizeof(*n), GFP_NOFS);
+	if (!n)
+		return -ENOMEM;
+	if (l->ents)
+		memcpy(n, l->ents, l->nr * sizeof(*n));
+	kvfree(l->ents);
+	l->ents = n;
+	l->cap = cap;
+	return 0;
+}
+
+/* Make room for @more entries, so ks3fs_listing_add() can add them. */
+int ks3fs_listing_reserve(struct ks3fs_listing *l, int more)
+{
+	return listing_grow(l, max(l->nr + more, 64));
+}
+
+/*
+ * Add an entry that is not (yet) in the store, in room made beforehand
+ * (-ENOSPC without); it may be called under a spinlock.  Sort with
+ * ks3fs_listing_sort() afterwards.
+ */
+int ks3fs_listing_add(struct ks3fs_listing *l, const char *name, size_t len,
+		      bool is_dir, loff_t size, time64_t mtime)
+{
+	struct ks3fs_list_entry *e;
+
+	if (l->nr >= l->cap)
+		return -ENOSPC;
+	e = &l->ents[l->nr];
+	memset(e, 0, sizeof(*e));
+	e->name = kmemdup_nul(name, len, GFP_ATOMIC);
+	if (!e->name)
+		return -ENOMEM;
+	e->is_dir = is_dir;
+	e->size = size;
+	e->mtime = mtime;
+	l->nr++;
+	return 0;
+}
+
 static int list_cb(void *arg, const char *key, size_t keylen, bool is_prefix,
 		   loff_t size, time64_t mtime, const char *etag)
 {
@@ -110,18 +157,8 @@ static int list_cb(void *arg, const char *key, size_t keylen, bool is_prefix,
 
 	if (!l->ents)		/* counting only */
 		return 0;
-	if (l->nr == l->cap) {
-		int ncap = l->cap * 2;
-		struct ks3fs_list_entry *n;
-
-		n = kvmalloc_array(ncap, sizeof(*n), GFP_NOFS);
-		if (!n)
-			return -ENOMEM;
-		memcpy(n, l->ents, l->nr * sizeof(*n));
-		kvfree(l->ents);
-		l->ents = n;
-		l->cap = ncap;
-	}
+	if (l->nr == l->cap && listing_grow(l, l->cap * 2))
+		return -ENOMEM;
 	e = &l->ents[l->nr];
 	e->name = kmemdup_nul(name, nlen, GFP_NOFS);
 	if (!e->name)
@@ -285,11 +322,27 @@ void ks3fs_listing_free(struct ks3fs_listing *l)
 	l->nr = l->cap = 0;
 }
 
+/* Sort by name; of duplicate names keep one, the file if there is one. */
+void ks3fs_listing_sort(struct ks3fs_listing *l)
+{
+	int i, j;
+
+	sort(l->ents, l->nr, sizeof(*l->ents), cmp_ent, NULL);
+	for (i = 0, j = 0; i < l->nr; i++) {
+		if (j && !strcmp(l->ents[j - 1].name, l->ents[i].name)) {
+			kfree(l->ents[i].name);
+			continue;
+		}
+		l->ents[j++] = l->ents[i];
+	}
+	l->nr = j;
+}
+
 /* List the immediate children of @dirkey (a full key ending in '/' or ""). */
 int ks3fs_s3_list_dir(struct ks3fs_sb_info *sbi, const char *dirkey,
 		      struct ks3fs_listing *out)
 {
-	int i, j, err;
+	int err;
 
 	memset(out, 0, sizeof(*out));
 	out->cap = 64;
@@ -304,15 +357,7 @@ int ks3fs_s3_list_dir(struct ks3fs_sb_info *sbi, const char *dirkey,
 	}
 
 	/* S3 returns objects and prefixes separately; merge and dedupe. */
-	sort(out->ents, out->nr, sizeof(*out->ents), cmp_ent, NULL);
-	for (i = 0, j = 0; i < out->nr; i++) {
-		if (j && !strcmp(out->ents[j - 1].name, out->ents[i].name)) {
-			kfree(out->ents[i].name);
-			continue;
-		}
-		out->ents[j++] = out->ents[i];
-	}
-	out->nr = j;
+	ks3fs_listing_sort(out);
 	return 0;
 }
 

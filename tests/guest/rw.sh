@@ -1,6 +1,7 @@
 # Read/write behaviour against an S3 server seeded by tests/run.sh (MinIO, RGW, versitygw).
 SUITE=${SUITE:-rw}
 . /tests/lib.sh
+close_to_open	# these checks expect a file to be stored by its close
 M=/mnt/a
 M2=/mnt/b
 # rw-tls.sh reruns this suite over TLS with its own bucket and options
@@ -351,23 +352,6 @@ sleep 2
 fails "external delete visible after ttl" cat $M/ext.txt
 
 # ---- request counters in /proc/self/mountstats
-# stat_of MOUNT NAME: one counter ("get", "tier1", "4xx", "sent", ...) of that mount
-stat_of() {
-	awk -v mnt="$1" -v key="$2" '
-		$0 ~ (" mounted on " mnt " with fstype ks3fs") { f = 1; next }
-		/^device / { f = 0 }
-		f && /^\t(requests|billing|responses|bytes):/ {
-			for (i = 2; i < NF; i += 2) if ($i == key) print $(i + 1)
-		}' /proc/self/mountstats
-}
-# stats_sum MOUNT SECTION: the sum of one line's counters ("requests", "billing")
-stats_sum() {
-	awk -v mnt="$1" -v sec="$2" '
-		$0 ~ (" mounted on " mnt " with fstype ks3fs") { f = 1; next }
-		/^device / { f = 0 }
-		f && $1 == sec ":" { for (i = 3; i <= NF; i += 2) n += $i }
-		END { print n + 0 }' /proc/self/mountstats
-}
 check "mountstats has ks3fs counters" sh -c "grep -A2 ' mounted on $M with fstype ks3fs' /proc/self/mountstats | grep -q 'ks3fs-stats-version: 1'"
 g0=$(stat_of $M get); p0=$(stat_of $M put); d0=$(stat_of $M delete); l0=$(stat_of $M list)
 drop_caches

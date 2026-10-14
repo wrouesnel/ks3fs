@@ -27,6 +27,28 @@
 
 static struct kmem_cache *ks3fs_inode_cachep;
 
+/* ---------- tunables (/sys/module/ks3fs/parameters/, read at each use) ---------- */
+
+unsigned int ks3fs_own_dir_ttl = 60;
+module_param_named(own_dir_ttl, ks3fs_own_dir_ttl, uint, 0644);
+MODULE_PARM_DESC(own_dir_ttl, "seconds a directory this mount created answers lookups of names it lacks without asking the store (0: off)");
+
+bool ks3fs_lazy_create = true;
+module_param_named(lazy_create, ks3fs_lazy_create, bool, 0644);
+MODULE_PARM_DESC(lazy_create, "store a new file at its first upload rather than with an empty PUT at creation");
+
+unsigned int ks3fs_upload_delay_ms = 5000;
+module_param_named(upload_delay_ms, ks3fs_upload_delay_ms, uint, 0644);
+MODULE_PARM_DESC(upload_delay_ms, "ms after the last close before a file's data is uploaded (0: on close)");
+
+unsigned int ks3fs_meta_delay_ms = 5000;
+module_param_named(meta_delay_ms, ks3fs_meta_delay_ms, uint, 0644);
+MODULE_PARM_DESC(meta_delay_ms, "ms before chmod/chown/utimes/xattr changes are written back");
+
+unsigned int ks3fs_readdir_window_ms = 10000;
+module_param_named(readdir_window_ms, ks3fs_readdir_window_ms, uint, 0644);
+MODULE_PARM_DESC(readdir_window_ms, "ms a listing is kept for prefetching its entries' attributes");
+
 /* ---------- inodes ---------- */
 
 static struct inode *ks3fs_alloc_inode(struct super_block *sb)
@@ -46,6 +68,9 @@ static struct inode *ks3fs_alloc_inode(struct super_block *sb)
 	ki->stream_next = 0;
 	ki->snap = NULL;
 	ki->xattr = NULL;
+	ki->own_since = 0;
+	INIT_LIST_HEAD(&ki->pending);
+	ki->pending_dentry = NULL;
 	atomic_set(&ki->opens, 0);
 	return &ki->vfs_inode;
 }
@@ -315,7 +340,7 @@ void ks3fs_schedule_meta_writeback(struct inode *inode)
 {
 	mark_inode_dirty(inode);
 	queue_delayed_work(system_unbound_wq, &KS3_SB(inode->i_sb)->meta_work,
-			   KS3FS_META_DELAY);
+			   ks3fs_ms_param(&ks3fs_meta_delay_ms));
 }
 
 static int ks3fs_write_inode(struct inode *inode, struct writeback_control *wbc)
@@ -473,6 +498,14 @@ static int ks3fs_show_options(struct seq_file *m, struct dentry *root)
 	return 0;
 }
 
+/* sync(2), syncfs(2) and unmount: closed files go out now, not later. */
+static int ks3fs_sync_fs(struct super_block *sb, int wait)
+{
+	if (wait)
+		ks3fs_upload_pending(KS3_SB(sb));
+	return 0;
+}
+
 static const struct super_operations ks3fs_sops = {
 	.alloc_inode	= ks3fs_alloc_inode,
 	.free_inode	= ks3fs_free_inode,
@@ -482,6 +515,7 @@ static const struct super_operations ks3fs_sops = {
 	.show_stats	= ks3fs_show_stats,
 	.drop_inode	= ks3fs_drop_inode,
 	.write_inode	= ks3fs_write_inode,	/* nothing to keep uncached */
+	.sync_fs	= ks3fs_sync_fs,
 };
 
 static void ks3fs_free_sbi(struct ks3fs_sb_info *sbi)
@@ -693,6 +727,9 @@ static int ks3fs_fill_super(struct super_block *sb, struct fs_context *fc)
 	spin_lock_init(&sbi->conn_lock);
 	sbi->sb = sb;
 	INIT_DELAYED_WORK(&sbi->meta_work, ks3fs_meta_work);
+	spin_lock_init(&sbi->pending_lock);
+	INIT_LIST_HEAD(&sbi->pending);
+	INIT_DELAYED_WORK(&sbi->upload_work, ks3fs_upload_work);
 	INIT_LIST_HEAD(&sbi->idle_conns);
 
 	if (!ctx->port)
@@ -891,9 +928,17 @@ static void ks3fs_kill_sb(struct super_block *sb)
 {
 	struct ks3fs_sb_info *sbi = KS3_SB(sb);
 
-	/* unmount's sync_filesystem() stores whatever metadata is pending */
-	if (sbi)
+	/*
+	 * Pending uploads pin their dentries, which must all be gone before
+	 * the dcache is shrunk (ahead of unmount's sync_filesystem()); that
+	 * sync stores whatever metadata is pending.
+	 */
+	if (sbi) {
+		cancel_delayed_work_sync(&sbi->upload_work);
+		if (sb->s_root)
+			ks3fs_upload_pending(sbi);
 		cancel_delayed_work_sync(&sbi->meta_work);
+	}
 	kill_anon_super(sb);
 	ks3fs_free_sbi(sbi);
 }

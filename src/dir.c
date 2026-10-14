@@ -59,8 +59,13 @@ struct ks3fs_snap {
 	struct ks3fs_listing l;
 };
 
-#define SNAP_WINDOW	(10 * HZ)
 #define PREFETCH_MAX	20000
+
+static bool snap_recent(struct ks3fs_snap *snap)
+{
+	return time_before(jiffies, snap->time +
+			   ks3fs_ms_param(&ks3fs_readdir_window_ms));
+}
 
 static void snap_free(struct kref *ref)
 {
@@ -287,6 +292,129 @@ out:
 	return have;
 }
 
+/* ---------- directories made here, files not stored yet ---------- */
+
+/*
+ * A directory this mount created holds nothing it didn't put there, and
+ * all of that is in the dcache: a name it lacks needs no HEAD + LIST to
+ * be absent.  This holds until an entry is dropped from the dcache
+ * (ks3fs_d_prune()), and is trusted for own_dir_ttl seconds, as other
+ * clients could add entries meanwhile.
+ */
+static bool own_dir_fresh(struct inode *dir)
+{
+	struct ks3fs_inode *di = KS3_I(dir);
+	unsigned int ttl = READ_ONCE(ks3fs_own_dir_ttl);
+
+	return ttl && test_bit(KS3_I_OWN, &di->flags) &&
+	       time_before(jiffies, di->own_since + (unsigned long)ttl * HZ);
+}
+
+/* @parent may no longer list all it holds (d_lock or a reference held). */
+static void own_dir_forget(struct dentry *parent)
+{
+	if (d_really_is_positive(parent))
+		clear_bit(KS3_I_OWN, &KS3_I(d_inode(parent))->flags);
+}
+
+/* d_lock held: a positive entry leaving the dcache. */
+static void ks3fs_d_prune(struct dentry *dentry)
+{
+	if (d_really_is_positive(dentry) && !IS_ROOT(dentry))
+		own_dir_forget(dentry->d_parent);
+}
+
+/* After d_revalidate() found @dentry's object gone or replaced. */
+static void own_dir_forget_parent(struct dentry *dentry)
+{
+	struct dentry *parent = dget_parent(dentry);
+
+	own_dir_forget(parent);
+	dput(parent);
+}
+
+/*
+ * Call @fn (under d_lock: it must not sleep) for every cached file in
+ * @parent that lazy_create has not stored yet; listings can't show them.
+ * Stops at, and returns, the first nonzero return.
+ */
+static int for_each_unstored(struct dentry *parent,
+			     int (*fn)(struct dentry *, void *), void *arg)
+{
+	struct dentry *child;
+	int ret = 0;
+
+	spin_lock(&parent->d_lock);
+	hlist_for_each_entry(child, &parent->d_children, d_sib) {
+		spin_lock_nested(&child->d_lock, DENTRY_D_LOCK_NESTED);
+		if (d_really_is_positive(child) && !d_unhashed(child) &&
+		    ks3fs_unstored(d_inode(child)))
+			ret = fn(child, arg);
+		spin_unlock(&child->d_lock);
+		if (ret)
+			break;
+	}
+	spin_unlock(&parent->d_lock);
+	return ret;
+}
+
+static int found_one(struct dentry *dentry, void *arg)
+{
+	return 1;
+}
+
+static bool has_unstored(struct dentry *parent)
+{
+	return for_each_unstored(parent, found_one, NULL);
+}
+
+struct add_unstored {
+	struct ks3fs_listing *l;
+	int nr;
+	int err;
+};
+
+static int count_unstored(struct dentry *dentry, void *arg)
+{
+	((struct add_unstored *)arg)->nr++;
+	return 0;
+}
+
+static int add_unstored_one(struct dentry *dentry, void *arg)
+{
+	struct add_unstored *c = arg;
+	struct inode *inode = d_inode(dentry);
+
+	c->err = ks3fs_listing_add(c->l, dentry->d_name.name, dentry->d_name.len,
+				   false, i_size_read(inode),
+				   inode_get_mtime_sec(inode));
+	return c->err;
+}
+
+/* Merge the files of @parent that are not stored yet into its listing. */
+static int listing_add_unstored(struct dentry *parent, struct ks3fs_listing *l)
+{
+	struct add_unstored c = { .l = l };
+	int err;
+
+	for_each_unstored(parent, count_unstored, &c);
+	if (!c.nr)
+		return 0;
+	do {
+		/* entries added before running out of room are deduped */
+		err = ks3fs_listing_reserve(l, c.nr);
+		if (err)
+			return err;
+		c.err = 0;
+		for_each_unstored(parent, add_unstored_one, &c);
+		c.nr *= 2;	/* more were made meanwhile */
+	} while (c.err == -ENOSPC);
+	if (c.err)
+		return c.err;
+	ks3fs_listing_sort(l);
+	return 0;
+}
+
 /*
  * Answer a lookup from a prefetch of the whole directory, if a recent
  * listing suggests one is worthwhile (only the first such lookup does it).
@@ -303,14 +431,12 @@ static bool lookup_prefetched(struct inode *dir, struct dentry *dentry,
 	snap = dir_get_snap(dir);
 	if (!snap)
 		return false;
-	if (time_before(jiffies, snap->time + SNAP_WINDOW) &&
-	    snap->l.nr > 1 && snap->l.nr <= PREFETCH_MAX &&
+	if (snap_recent(snap) && snap->l.nr > 1 && snap->l.nr <= PREFETCH_MAX &&
 	    (i = snap_find(snap, &dentry->d_name)) >= 0 &&
 	    !atomic_xchg(&snap->prefetched, 1))
 		have = prefetch_dir(dentry->d_parent, snap, i, attr);
 	/* used up or too old: don't keep the listing around */
-	if (atomic_read(&snap->prefetched) ||
-	    !time_before(jiffies, snap->time + SNAP_WINDOW))
+	if (atomic_read(&snap->prefetched) || !snap_recent(snap))
 		ks3fs_dir_forget_snap(dir);
 	snap_put(snap);
 	return have;
@@ -328,6 +454,11 @@ static struct dentry *ks3fs_lookup(struct inode *dir, struct dentry *dentry,
 	if (IS_ROOT(dentry->d_parent) && dentry->d_name.len == sizeof(KS3FS_ORPHANS) - 1 &&
 	    !memcmp(dentry->d_name.name, KS3FS_ORPHANS, dentry->d_name.len))
 		return d_splice_alias(NULL, dentry);	/* hidden */
+
+	if (own_dir_fresh(dir)) {
+		set_dentry_time(dentry);
+		return d_splice_alias(NULL, dentry);
+	}
 
 	key = ks3fs_child_key(dir, &dentry->d_name, false);
 	if (IS_ERR(key))
@@ -417,6 +548,12 @@ static int ks3fs_readdir(struct file *file, struct dir_context *ctx)
 		err = ks3fs_s3_list_dir(KS3_SB(dir->i_sb), key, &snap->l);
 		kfree(key);
 		if (err) {
+			kfree(snap);
+			return err;
+		}
+		err = listing_add_unstored(file->f_path.dentry, &snap->l);
+		if (err) {
+			ks3fs_listing_free(&snap->l);
 			kfree(snap);
 			return err;
 		}
@@ -538,6 +675,7 @@ static int ks3fs_create(struct mnt_idmap *idmap, struct inode *dir,
 	struct ks3fs_attr attr = {};
 	struct ks3fs_meta *meta;
 	struct inode *inode;
+	bool lazy;
 	char *key;
 	int err;
 
@@ -550,14 +688,25 @@ static int ks3fs_create(struct mnt_idmap *idmap, struct inode *dir,
 	err = new_meta_acl(dir, S_IFREG | mode, &attr.meta, &meta);
 	if (err)
 		goto out;
-	/* create the object now so it is visible and permissions are checked */
-	err = ks3fs_s3_put_buf(sbi, key, NULL, 0, meta, attr.etag);
-	if (err)
-		goto out;
+	/*
+	 * Without lazy_create, store the object now so other clients see it
+	 * and permissions are checked.  With it, the first upload creates it
+	 * with the data (and any chmod made before then) in one PUT.
+	 */
+	lazy = READ_ONCE(ks3fs_lazy_create);
+	if (!lazy) {
+		err = ks3fs_s3_put_buf(sbi, key, NULL, 0, meta, attr.etag);
+		if (err)
+			goto out;
+	}
 	inode = ks3fs_new_inode(dir->i_sb, key, &attr);
 	if (IS_ERR(inode)) {
 		err = PTR_ERR(inode);
 		goto out;
+	}
+	if (lazy) {
+		clear_bit(KS3_I_REMOTE, &KS3_I(inode)->flags);
+		set_bit(KS3_I_DIRTY, &KS3_I(inode)->flags);	/* even if empty */
 	}
 	set_dentry_time(dentry);
 	d_instantiate(dentry, inode);
@@ -674,6 +823,8 @@ static KS3_MKDIR_RET ks3fs_mkdir(struct mnt_idmap *idmap, struct inode *dir,
 		if (IS_ERR(inode)) {
 			err = PTR_ERR(inode);
 		} else {
+			KS3_I(inode)->own_since = jiffies;
+			set_bit(KS3_I_OWN, &KS3_I(inode)->flags);
 			set_dentry_time(dentry);
 			d_instantiate(dentry, inode);
 			ks3fs_dir_forget_snap(dir);
@@ -737,7 +888,7 @@ static int ks3fs_unlink(struct inode *dir, struct dentry *dentry)
 		return -ENOMEM;
 	/* the VFS holds the inode lock: keep data of open files readable */
 	err = ks3fs_orphan(inode);
-	if (!err)
+	if (!err && !ks3fs_unstored(inode))	/* else there is no object */
 		err = ks3fs_s3_delete(KS3_SB(dir->i_sb), key);
 	kfree(key);
 	if (err)
@@ -757,7 +908,7 @@ static int ks3fs_rmdir(struct inode *dir, struct dentry *dentry)
 
 	if (!key)
 		return -ENOMEM;
-	err = ks3fs_s3_dir_is_empty(sbi, key);
+	err = has_unstored(dentry) ? 0 : ks3fs_s3_dir_is_empty(sbi, key);
 	if (err == 0)
 		err = -ENOTEMPTY;
 	else if (err > 0)
@@ -867,11 +1018,22 @@ static int dm_delete(void *ctx, int i)
 	return ks3fs_s3_delete(dm->sbi, dm->kl.ents[i].key);
 }
 
-/* Refuse (-EBUSY) if a file below has unsaved data; store pending metadata. */
+/*
+ * Store files below that are closed but not uploaded yet (upload_delay_ms,
+ * lazy_create), refuse (-EBUSY) if one is still being written, and store
+ * pending metadata.
+ */
 static int dm_prepare_one(struct inode *inode, void *arg)
 {
 	struct ks3fs_inode *ki = KS3_I(inode);
+	int err;
 
+	if ((test_bit(KS3_I_DIRTY, &ki->flags) || ki->mpu) &&
+	    S_ISREG(inode->i_mode) && !inode_is_open_for_write(inode)) {
+		err = ks3fs_upload(inode);
+		if (err)
+			return err;
+	}
 	if (test_bit(KS3_I_DIRTY, &ki->flags) || ki->mpu)
 		return -EBUSY;
 	return ks3fs_push_meta(inode);
@@ -914,7 +1076,8 @@ static int rename_dir(struct inode *old_dir, struct dentry *old_dentry,
 		goto out;
 	}
 	if (target) {
-		err = ks3fs_s3_dir_is_empty(sbi, dm->dst);
+		err = has_unstored(new_dentry) ? 0 :
+		      ks3fs_s3_dir_is_empty(sbi, dm->dst);
 		if (err <= 0) {
 			err = err ?: -ENOTEMPTY;
 			goto out;
@@ -990,18 +1153,28 @@ static int ks3fs_rename(struct mnt_idmap *idmap, struct inode *old_dir,
 	if (S_ISDIR(inode->i_mode))
 		return rename_dir(old_dir, old_dentry, new_dir, new_dentry);
 
-	/* the VFS holds the source inode lock for non-directories */
+	dst = ks3fs_child_key(new_dir, &new_dentry->d_name, false);
+	if (IS_ERR(dst))
+		return PTR_ERR(dst);
+	/*
+	 * The VFS holds the source inode lock for non-directories, so no
+	 * upload is under way: one not stored yet just goes to the new name.
+	 */
+	if (!target && ks3fs_unstored(inode) && !ki->mpu) {
+		etag[0] = '\0';
+		err = 0;
+		goto moved;
+	}
+
 	err = ks3fs_upload_locked(inode);
 	if (!err && target)	/* ...and the target's: it is about to go */
 		err = ks3fs_orphan(target);
 	if (err)
-		return err;
+		goto out;
 
 	src = ks3fs_inode_key(inode);
-	dst = ks3fs_child_key(new_dir, &new_dentry->d_name, false);
-	if (!src || IS_ERR(dst)) {
-		err = !src ? -ENOMEM : PTR_ERR(dst);
-		dst = NULL;
+	if (!src) {
+		err = -ENOMEM;
 		goto out;
 	}
 	if (i_size_read(inode) > KS3FS_MAX_PUT)	/* too big for CopyObject */
@@ -1018,6 +1191,7 @@ static int ks3fs_rename(struct mnt_idmap *idmap, struct inode *old_dir,
 		goto out;
 	}
 
+moved:
 	spin_lock(&ki->lock);
 	swap(ki->key, dst);
 	if (etag[0])
@@ -1103,18 +1277,23 @@ static int ks3fs_d_revalidate(KS3_REVALIDATE_ARGS)
 		key[kl - 1] = '\0';
 	err = ks3fs_s3_stat(sbi, key, &attr);
 	kfree(key);
-	if (err == -ENOENT)
+	if (err == -ENOENT) {
+		own_dir_forget_parent(dentry);
 		return 0;
+	}
 	if (err)
 		return 1;	/* transient failure: keep what we have */
 	err = revalidate_apply(inode, &attr);
 	ks3fs_meta_release(&attr.meta);
+	if (!err)
+		own_dir_forget_parent(dentry);	/* a lookup must find the new one */
 	return err;
 }
 
 
 const struct dentry_operations ks3fs_dops = {
 	.d_revalidate	= ks3fs_d_revalidate,
+	.d_prune	= ks3fs_d_prune,
 };
 
 const struct inode_operations ks3fs_dir_iops = {

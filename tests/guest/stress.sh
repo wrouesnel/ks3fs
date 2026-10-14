@@ -2,6 +2,7 @@
 # (concurrent random namespace and data operations) from xfstests.
 SUITE=stress
 . /tests/lib.sh
+close_to_open	# these checks expect a file to be stored by its close
 M=/mnt/st
 M2=/mnt/st2
 MP=/mnt/stmp

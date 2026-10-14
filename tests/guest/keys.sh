@@ -2,6 +2,7 @@
 # space cannot read back, re-read for every request so it can be rotated.
 SUITE=keys
 . /tests/lib.sh
+close_to_open	# these checks expect a file to be stored by its close
 M=/mnt/keys
 mkdir -p $M
 EP="addr=10.0.2.2,port=$S3_PORT"

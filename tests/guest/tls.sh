@@ -1,6 +1,7 @@
 # TLS behaviour: verification, failure modes and the handshake agent.
 SUITE=tls
 . /tests/lib.sh
+close_to_open	# these checks expect a file to be stored by its close
 M=/mnt/tls
 mkdir -p $M
 CREDS="access_key=$S3_AK,secret_key=$S3_SK"

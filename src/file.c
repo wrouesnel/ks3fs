@@ -960,6 +960,172 @@ int ks3fs_upload(struct inode *inode)
 	return err;
 }
 
+/* A file made with lazy_create whose object does not exist yet. */
+bool ks3fs_unstored(struct inode *inode)
+{
+	struct ks3fs_inode *ki = KS3_I(inode);
+
+	return S_ISREG(inode->i_mode) && inode->i_nlink &&
+	       !test_bit(KS3_I_REMOTE, &ki->flags) &&
+	       !test_bit(KS3_I_TMPFILE, &ki->flags);
+}
+
+/* ---------- delayed upload of closed files ---------- */
+
+/*
+ * The last close of a written file queues its upload for upload_delay_ms,
+ * so that a chmod or utimes right after it (cp -p, tar, Nix) travels with
+ * the data instead of costing a CopyObject of its own.  The queue holds a
+ * reference to the file's dentry: that keeps the name in the dcache, the
+ * only record of a lazily created file until its upload.  Due uploads go
+ * out in batches, up to parallel= at a time; sync(2), syncfs(2) and
+ * unmount send everything queued at once.
+ */
+#define UPLOAD_BATCH	256
+
+struct upload_batch {
+	struct ks3fs_sb_info *sbi;
+	int nr;
+	bool done[UPLOAD_BATCH];
+	struct dentry *d[UPLOAD_BATCH];
+};
+
+/* Queue @dentry's file (consuming the caller's reference to @dentry). */
+static void pending_add(struct ks3fs_sb_info *sbi, struct dentry *dentry)
+{
+	struct ks3fs_inode *ki = KS3_I(d_inode(dentry));
+	struct dentry *extra = NULL;
+
+	spin_lock(&sbi->pending_lock);
+	if (list_empty(&ki->pending))
+		ki->pending_dentry = dentry;
+	else
+		extra = dentry;		/* queued already: its pin stays */
+	ki->pending_since = jiffies;
+	list_move_tail(&ki->pending, &sbi->pending);
+	spin_unlock(&sbi->pending_lock);
+	dput(extra);
+	queue_delayed_work(system_unbound_wq, &sbi->upload_work,
+			   ks3fs_ms_param(&ks3fs_upload_delay_ms));
+}
+
+static int upload_one(void *ctx, int i)
+{
+	struct upload_batch *b = ctx;
+	struct inode *inode = d_inode(b->d[i]);
+	int err;
+
+	b->done[i] = true;
+	if (inode_is_open_for_write(inode))
+		return 0;	/* written again: its last close queues it anew */
+	err = ks3fs_upload(inode);
+	if (err) {
+		pr_warn_ratelimited("ks3fs: upload of '%s' failed: %d\n",
+				    KS3_I(inode)->key, err);
+		/* as on close: don't leave a multipart upload behind */
+		inode_lock(inode);
+		ks3fs_mpu_discard(inode);
+		inode_unlock(inode);
+	}
+	return 0;	/* one failure doesn't hold up the others */
+}
+
+static void upload_batch_release(void *ctx)
+{
+	struct upload_batch *b = ctx;
+	int i;
+
+	for (i = 0; i < b->nr; i++) {
+		/* a sync that was killed: what it didn't reach stays queued */
+		if (!b->done[i] && test_bit(KS3_I_DIRTY, &KS3_I(d_inode(b->d[i]))->flags))
+			pending_add(b->sbi, b->d[i]);
+		else
+			dput(b->d[i]);
+	}
+	kvfree(b);
+}
+
+/*
+ * Take up to UPLOAD_BATCH files off @from: every one, or with @due_only
+ * those whose delay is over (*@next then says when the first other is).
+ */
+static int upload_take(struct ks3fs_sb_info *sbi, struct list_head *from,
+		       struct upload_batch *b, bool due_only,
+		       unsigned long *next)
+{
+	unsigned long delay = ks3fs_ms_param(&ks3fs_upload_delay_ms);
+	struct ks3fs_inode *ki, *tmp;
+
+	spin_lock(&sbi->pending_lock);
+	list_for_each_entry_safe(ki, tmp, from, pending) {
+		if (b->nr == UPLOAD_BATCH)
+			break;
+		if (due_only && time_before(jiffies, ki->pending_since + delay)) {
+			*next = ki->pending_since + delay;
+			break;
+		}
+		list_del_init(&ki->pending);
+		b->d[b->nr++] = ki->pending_dentry;
+		ki->pending_dentry = NULL;
+	}
+	spin_unlock(&sbi->pending_lock);
+	return b->nr;
+}
+
+/* Returns -EINTR if the caller was killed, -ENOMEM, else 0. */
+static int upload_run(struct ks3fs_sb_info *sbi, struct list_head *from,
+		      bool due_only, unsigned long *next)
+{
+	struct upload_batch *b;
+	int err;
+
+	for (;;) {
+		b = kvzalloc(sizeof(*b), GFP_KERNEL);
+		if (!b)
+			return -ENOMEM;
+		b->sbi = sbi;
+		if (!upload_take(sbi, from, b, due_only, next)) {
+			kvfree(b);
+			return 0;
+		}
+		err = ks3fs_parallel(sbi, b->nr, upload_one, b,
+				     upload_batch_release);
+		if (err == -EINTR || err == -ENOMEM)
+			return err;
+	}
+}
+
+void ks3fs_upload_work(struct work_struct *work)
+{
+	struct ks3fs_sb_info *sbi =
+		container_of(to_delayed_work(work), struct ks3fs_sb_info, upload_work);
+	unsigned long next = 0;
+
+	if (upload_run(sbi, &sbi->pending, true, &next))
+		next = jiffies + HZ;	/* out of memory: try again soon */
+	if (next)
+		queue_delayed_work(system_unbound_wq, &sbi->upload_work,
+				   time_after(next, jiffies) ? next - jiffies : 1);
+}
+
+/* Upload everything queued now, and wait for uploads already under way. */
+void ks3fs_upload_pending(struct ks3fs_sb_info *sbi)
+{
+	LIST_HEAD(todo);
+	unsigned long next = 0;
+
+	spin_lock(&sbi->pending_lock);
+	list_splice_init(&sbi->pending, &todo);
+	spin_unlock(&sbi->pending_lock);
+	upload_run(sbi, &todo, false, &next);
+	/* whatever is left (killed, out of memory) goes back in the queue */
+	spin_lock(&sbi->pending_lock);
+	list_splice(&todo, &sbi->pending);
+	spin_unlock(&sbi->pending_lock);
+	/* runs the timer now if it is set, and waits for a run under way */
+	flush_delayed_work(&sbi->upload_work);
+}
+
 /* ---------- file operations ---------- */
 
 static int ks3fs_flush(struct file *file, fl_owner_t id)
@@ -967,8 +1133,16 @@ static int ks3fs_flush(struct file *file, fl_owner_t id)
 	if (!(file->f_mode & FMODE_WRITE))
 		return 0;
 	struct inode *inode = file_inode(file);
+	int err = 0;
 
-	return ks3fs_upload(inode) ?: ks3fs_push_meta(inode);
+	/*
+	 * Upload at the close of the last descriptor of this open file (a
+	 * shell's redirection closes a dup before anything is written); with
+	 * upload_delay_ms the last release queues the upload instead.
+	 */
+	if (!READ_ONCE(ks3fs_upload_delay_ms) && file_count(file) <= 1)
+		err = ks3fs_upload(inode);
+	return err ?: ks3fs_push_meta(inode);
 }
 
 /* ---------- unlink while open ("silly rename", as NFS does) ---------- */
@@ -1054,6 +1228,11 @@ static int ks3fs_release(struct inode *inode, struct file *file)
 		ks3fs_orphan_delete(inode);
 	if (!(file->f_mode & FMODE_WRITE))
 		return 0;
+	if (READ_ONCE(ks3fs_upload_delay_ms) && inode->i_nlink &&
+	    test_bit(KS3_I_DIRTY, &KS3_I(inode)->flags)) {
+		pending_add(KS3_SB(inode->i_sb), dget(file->f_path.dentry));
+		return 0;
+	}
 	err = ks3fs_upload(inode);
 	if (err) {
 		pr_warn_ratelimited("ks3fs: upload of '%s' on close failed: %d\n",
