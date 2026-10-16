@@ -177,6 +177,34 @@ static void conn_destroy(struct ks3fs_conn *conn)
 	kfree(conn);
 }
 
+#ifdef CONFIG_DEBUG_LOCK_ALLOC
+/*
+ * Once tlshd is done with a socket, give its lock_sock() lock a class of
+ * our own.  Readahead sends under mapping->invalidate_lock, while tlshd's
+ * sendmsg() during a handshake may fault (mmap_lock) under the class all
+ * kernel sockets share; the two never meet on one socket, but lockdep
+ * would see a cycle.  Only the lock_sock() map changes: softirqs may be
+ * taking the socket's spinlock (session tickets arrive after a handshake).
+ */
+static struct lock_class_key ks3fs_sk_key[2];
+
+static void reclassify_socket(struct socket *sock)
+{
+	struct sock *sk = sock->sk;
+	bool v6 = sk->sk_family == AF_INET6;
+
+	if (sock_owned_by_user_nocheck(sk))
+		return;
+	lockdep_init_map(&sk->sk_lock.dep_map,
+			 v6 ? "sk_lock-AF_INET6-ks3fs" : "sk_lock-AF_INET-ks3fs",
+			 &ks3fs_sk_key[v6], 0);
+}
+#else
+static inline void reclassify_socket(struct socket *sock)
+{
+}
+#endif
+
 static struct ks3fs_conn *conn_new(struct ks3fs_sb_info *sbi)
 {
 	struct ks3fs_conn *conn;
@@ -222,9 +250,18 @@ static struct ks3fs_conn *conn_new(struct ks3fs_sb_info *sbi)
 		conn->file = file;
 		conn->tls = true;
 		err = ks3fs_tls_handshake(sbi, sock);
+		/*
+		 * tlshd reports every failed handshake as EACCES, a dropped
+		 * connection too.  Once one has succeeded the server and its
+		 * certificate are known good: retry, don't fail the syscall.
+		 */
+		if (err == -EACCES && test_bit(KS3_SB_TLS_OK, &sbi->state))
+			err = -ECONNRESET;
 		if (err)
 			goto fail;
+		set_bit(KS3_SB_TLS_OK, &sbi->state);
 	}
+	reclassify_socket(sock);
 	return conn;
 fail:
 	conn_destroy(conn);

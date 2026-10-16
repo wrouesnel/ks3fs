@@ -124,6 +124,7 @@ static inline unsigned long ks3fs_ms_param(const unsigned int *p)
 
 enum {
 	KS3_SB_OUTAGE,		/* "server not responding" has been logged */
+	KS3_SB_TLS_OK,		/* a TLS handshake has succeeded */
 };
 
 static inline struct ks3fs_sb_info *KS3_SB(struct super_block *sb)
@@ -285,6 +286,8 @@ int ks3fs_http_request(struct ks3fs_sb_info *sbi, struct ks3fs_req *req,
 		       struct ks3fs_resp *resp, char **body, size_t *body_len,
 		       struct ks3fs_retry *r);
 int ks3fs_status_to_errno(int status);
+void ks3fs_log_failure(const char *op, const char *key, int status,
+		       const char *body, size_t len);
 
 /* ---------- credentials (creds.c) ---------- */
 

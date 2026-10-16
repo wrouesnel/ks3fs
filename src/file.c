@@ -897,8 +897,12 @@ static int put_whole(struct inode *inode, loff_t size)
 	}
 	err = ks3fs_status_to_errno(resp.status);
 	if (err) {
-		pr_warn_ratelimited("ks3fs: PUT '%s' failed: HTTP %d\n", key,
-				    resp.status);
+		/* the error document says why (AccessDenied, ExpiredToken ...) */
+		char *ebuf = kmalloc(512, GFP_NOFS);
+		ssize_t n = ebuf ? ks3fs_http_read_body(conn, &resp, ebuf, 512) : 0;
+
+		ks3fs_log_failure("PUT", key, resp.status, ebuf, n > 0 ? n : 0);
+		kfree(ebuf);
 	} else {
 		spin_lock(&ki->lock);
 		strscpy(ki->etag, resp.etag, sizeof(ki->etag));

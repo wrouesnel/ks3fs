@@ -15,8 +15,8 @@ char *ks3fs_full_key(struct ks3fs_sb_info *sbi, const char *rel)
 	return kasprintf(GFP_NOFS, "%s%s", sbi->prefix, rel);
 }
 
-static void log_failure(const char *op, const char *key, int status,
-			const char *body, size_t len)
+void ks3fs_log_failure(const char *op, const char *key, int status,
+		       const char *body, size_t len)
 {
 	char code[64];
 
@@ -209,7 +209,7 @@ static int s3_list_raw(struct ks3fs_sb_info *sbi, const char *prefix,
 			break;
 		err = ks3fs_status_to_errno(resp.status);
 		if (err) {
-			log_failure("LIST", prefix, resp.status, body, len);
+			ks3fs_log_failure("LIST", prefix, resp.status, body, len);
 			kvfree(body);
 			break;
 		}
@@ -434,48 +434,29 @@ int ks3fs_s3_dir_is_empty(struct ks3fs_sb_info *sbi, const char *dirkey)
 	return count == 0;
 }
 
-struct mem_body {
-	const void *buf;
-	size_t len;
-};
-
-static int send_mem(struct ks3fs_conn *conn, void *arg)
-{
-	struct mem_body *mb = arg;
-
-	return ks3fs_http_send(conn, mb->buf, mb->len);
-}
-
 /* PUT a small in-memory object (possibly empty) with metadata. */
 int ks3fs_s3_put_buf(struct ks3fs_sb_info *sbi, const char *key,
 		     const void *buf, size_t len,
 		     const struct ks3fs_meta *meta, char *etag_out)
 {
-	struct mem_body mb = { .buf = buf, .len = len };
 	struct ks3fs_req req = {
-		.method = "PUT", .key = key, .body_len = len, .meta = meta,
+		.method = "PUT", .key = key, .body = buf, .body_len = len,
+		.meta = meta,
 	};
 	struct ks3fs_resp resp;
-	struct ks3fs_conn *conn;
-	char hash[65];
+	size_t blen = 0;
+	char *body = NULL;
 	int err;
 
-	if (len) {
-		err = ks3fs_sha256_hex(buf, len, hash);
-		if (err)
-			return err;
-		req.payload_sha256 = hash;
-	}
-	conn = ks3fs_http_start(sbi, &req, &resp, len ? send_mem : NULL, &mb,
-				NULL);
-	if (IS_ERR(conn))
-		return PTR_ERR(conn);
+	err = ks3fs_http_simple(sbi, &req, &resp, &body, &blen);
+	if (err)
+		return err;
 	err = ks3fs_status_to_errno(resp.status);
 	if (err)
-		log_failure("PUT", key, resp.status, NULL, 0);
+		ks3fs_log_failure("PUT", key, resp.status, body, blen);
 	else if (etag_out)
 		strscpy(etag_out, resp.etag, KS3FS_ETAG_LEN);
-	ks3fs_http_finish(sbi, conn, &resp);
+	kvfree(body);
 	return err;
 }
 
@@ -494,7 +475,7 @@ int ks3fs_s3_delete(struct ks3fs_sb_info *sbi, const char *key)
 	if (err == -ENOENT)
 		err = 0;
 	if (err)
-		log_failure("DELETE", key, resp.status, body, len);
+		ks3fs_log_failure("DELETE", key, resp.status, body, len);
 	kvfree(body);
 	return err;
 }
@@ -537,7 +518,7 @@ static int s3_copy(struct ks3fs_sb_info *sbi, const char *src,
 	if (!err && body && strnstr(body, "<Error>", len))
 		err = -EIO;
 	if (err) {
-		log_failure("COPY", dst, resp.status, body, len);
+		ks3fs_log_failure("COPY", dst, resp.status, body, len);
 	} else if (etag_out &&
 		   ks3fs_xml_get(body, len, "ETag", etag_out, KS3FS_ETAG_LEN)) {
 		/* entity-decoded: MinIO writes the quotes as &#34;, AWS as &quot; */

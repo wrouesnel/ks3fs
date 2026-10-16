@@ -19,6 +19,8 @@ with busybox wget:
   GET /uncut                      drop the cut budgets not used yet
   GET /cutreq?match=S&count=K     cut the answer to each of the next K requests
                                   whose request line contains S (plain HTTP)
+  GET /hsfail?count=K             fail the TLS handshake of each of the next K
+                                  connections to a TLS listener with an alert
   GET /slow?bps=N                 throttle server->client to N bytes/s (0=off)
   GET /delay?ms=N                 add N ms before each server->client read
   GET /stats                      JSON counters
@@ -35,12 +37,22 @@ import struct
 import sys
 import urllib.parse
 
-state = {"mode": "normal", "bps": 0, "delay": 0.0, "cutreq": None}
+state = {"mode": "normal", "bps": 0, "delay": 0.0, "cutreq": None, "hsfail": 0}
 cuts = {"down": [], "up": []}     # queued (bytes, port) budgets for new connections
-stats = {"conns": 0, "resets": 0, "cuts": 0, "bytes_down": 0, "bytes_up": 0}
+stats = {"conns": 0, "resets": 0, "cuts": 0, "hsfails": 0, "bytes_down": 0,
+         "bytes_up": 0}
 active = {}                       # conn -> {"down": budget|None, "up": ...}
 # a budget is [bytes left, bytes, port or None, fired]
 servers = []
+
+
+def hello(sslobj, server_name, ctx):
+    """Runs on every ClientHello: refuse the handshake while /hsfail says so."""
+    if state["hsfail"] > 0:
+        state["hsfail"] -= 1
+        stats["hsfails"] += 1
+        return ssl.ALERT_DESCRIPTION_HANDSHAKE_FAILURE
+    return None
 
 
 def rst(writer):
@@ -187,10 +199,13 @@ async def control(reader, writer, listen, upstream):
         elif url.path == "/cutreq":
             state["cutreq"] = {"match": q["match"].encode(),
                                "count": int(q.get("count", 1))}
+        elif url.path == "/hsfail":
+            state["hsfail"] = int(q.get("count", 1))
         elif url.path == "/uncut":
             cuts["down"].clear()
             cuts["up"].clear()
             state["cutreq"] = None
+            state["hsfail"] = 0
             for budgets in active.values():
                 budgets["down"] = budgets["up"] = None
         elif url.path == "/delay":
@@ -225,6 +240,7 @@ async def main():
         if len(parts) == 3:
             ctx = ssl.create_default_context(ssl.Purpose.CLIENT_AUTH)
             ctx.load_cert_chain(parts[1], parts[2])
+            ctx.sni_callback = hello
         listen.append((int(parts[0]), ctx))
     await start_listeners(listen, upstream)
     ctl = await asyncio.start_server(

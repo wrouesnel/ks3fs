@@ -145,6 +145,10 @@ No maintained in-kernel S3 filesystem was found.
   request can be replayed.
   - Transport errors and 429/5xx responses are retried with exponential
     backoff (0.1 s doubling to 5 s).
+  - tlshd reports any failed TLS handshake as `EACCES`, a dropped connection
+    too. The mount's first handshake fails at once (a bad certificate or
+    name); after one has succeeded, failed handshakes are retried like
+    transport errors.
   - `soft` (the default) gives up with `EIO` after `retry_timeout` seconds;
     `hard` retries until the process is killed.
   - A GET that breaks mid-body resumes with a ranged GET from the byte it had

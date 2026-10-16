@@ -5,6 +5,7 @@ SUITE=faults
 close_to_open	# these checks expect a file to be stored by its close
 ctl() { wget -q -T 10 -O- "http://10.0.2.2:$FP_CTL/$1" >/dev/null; }
 cuts() { wget -q -T 10 -O- "http://10.0.2.2:$FP_CTL/stats" | sed -n 's/.*"cuts": *\([0-9]*\).*/\1/p'; }
+hsfails() { wget -q -T 10 -O- "http://10.0.2.2:$FP_CTL/stats" | sed -n 's/.*"hsfails": *\([0-9]*\).*/\1/p'; }
 elapsed() { echo $(( $(date +%s) - t0 )); }
 M=/mnt/f
 M2=/mnt/f2
@@ -189,6 +190,18 @@ c1=$(cuts)
 # server closing every connection may leave a budget unused at the end)
 check "the proxy really cut TLS connections ($c0 -> $c1)" test "$c1" -ge $((c0 + 1))
 ctl uncut	# budgets not used must not cut later tests
+# failed handshakes (tlshd reports EACCES) once the mount has had a good
+# one: retried, not "Permission denied".  Reset first so no idle connection
+# is reused and the next request needs a new handshake.
+ctl "set?mode=reset"; sleep 0.5; ctl "set?mode=normal"
+h0=$(hsfails)
+ctl "hsfail?count=3"
+check "write survives 3 failed handshakes" sh -c "echo handshake > $M2/faults-hs.txt"
+h1=$(hsfails)
+check "the proxy really failed handshakes ($h0 -> $h1)" test "$h1" -eq $((h0 + 3))
+ctl uncut
+eq "written through the retried handshakes" "$(cat $M/faults-hs.txt)" "handshake"
+rm -f $M2/faults-hs.txt
 
 # ---- a multipart completion whose answer is lost: retried, then checked
 # (a server may answer the retry before the object exists)
