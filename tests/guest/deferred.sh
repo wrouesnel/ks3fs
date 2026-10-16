@@ -42,7 +42,7 @@ fails "absent name in an own directory" test -e $M/pkg/nope
 eq "  ...without a request" "$(delta head)" "0"
 fails "rmdir with unstored files" rmdir $M/pkg
 sleep 5
-eq "after the delay: one PUT per file" "$(delta put)" "20"
+eq "after the delay: one PUT per file, one for the directory" "$(delta put)" "21"
 eq "  ...and no CopyObject for chmod/utimes" "$(delta copy)" "0"
 eq "content stored" "$(cat $M2/pkg/f12)" "file 12"
 eq "mode and mtime stored with it" "$(stat -c '%a %Y' $M2/pkg/f12)" "444 1"
@@ -71,7 +71,7 @@ check "unlink before it is stored" rm $M/u/c
 eq "  ...costs nothing" "$(( $(delta delete) + $(delta put) ))" "0"
 check "sync" sync
 eq "rewritten and renamed file stored once" "$(cat $M2/u/b | tr '\n' ' ')" "one two "
-eq "  ...with one PUT" "$(delta put)" "1"
+eq "  ...with one PUT (and one for the directory)" "$(delta put)" "2"
 fails "old name never stored" test -e $M2/u/a
 fails "unlinked file never stored" test -e $M2/u/c
 
@@ -84,9 +84,43 @@ eq "moved file content" "$(cat $M2/t2/sub/x)" "x"
 eq "moved file content (top)" "$(cat $M2/t2/y)" "y"
 fails "old tree gone" test -e $M2/t
 
+# ---- directories and symlinks: stored once, with their final metadata
+snap
+mkdir -p $M/tree/sub
+ln -s ../target $M/tree/link
+chown -h 7:8 $M/tree/link
+chmod 555 $M/tree/sub
+touch -t 197001010000.01 $M/tree/sub
+eq "mkdir, symlink and their metadata: nothing sent yet" "$(( $(delta put) + $(delta copy) ))" "0"
+eq "unstored symlink reads back" "$(readlink $M/tree/link)" "../target"
+eq "unstored entries are listed" "$(ls $M/tree | tr '\n' ' ')" "link sub "
+check "unstored directory is a directory" test -d $M/tree/sub
+fails "rmdir of a directory holding unstored entries" rmdir $M/tree
+sleep 5
+eq "after the delay: one PUT each (tree, sub, link)" "$(delta put)" "3"
+eq "  ...and no CopyObject" "$(delta copy)" "0"
+eq "directory mode and mtime stored" "$(stat -c '%a %Y' $M2/tree/sub)" "555 1"
+eq "symlink target stored" "$(readlink $M2/tree/link)" "../target"
+eq "symlink owner stored" "$(stat -c '%u %g' $M2/tree/link)" "7 8"
+
+# ---- own_dir_ttl counts from this mount's last change to the directory
+ks3param own_dir_ttl 2
+mkdir $M/slide
+sleep 1
+: > $M/slide/a
+sleep 1.5
+snap
+fails "absent name 2.5 s after mkdir, 1.5 s after the last change" test -e $M/slide/nope
+eq "  ...still answered locally" "$(delta head)" "0"
+sleep 2.5
+fails "absent name after own_dir_ttl without changes" test -e $M/slide/nope2
+check "  ...asks the store" test "$(delta head)" -ge 1
+ks3param own_dir_ttl 60
+
 # ---- the tunables
 ks3param own_dir_ttl 0
 mkdir $M/plain
+sync	# its marker: not to be counted below
 snap
 fails "absent name, own_dir_ttl=0" test -e $M/plain/nope
 check "  ...asks the store" test "$(delta head)" -ge 1

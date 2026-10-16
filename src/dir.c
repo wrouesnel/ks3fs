@@ -298,8 +298,9 @@ out:
  * A directory this mount created holds nothing it didn't put there, and
  * all of that is in the dcache: a name it lacks needs no HEAD + LIST to
  * be absent.  This holds until an entry is dropped from the dcache
- * (ks3fs_d_prune()), and is trusted for own_dir_ttl seconds, as other
- * clients could add entries meanwhile.
+ * (ks3fs_d_prune()).  As other clients could add entries meanwhile, it is
+ * trusted for own_dir_ttl seconds after this mount last changed the
+ * directory, so a tree being written stays trusted however long it takes.
  */
 static bool own_dir_fresh(struct inode *dir)
 {
@@ -308,6 +309,35 @@ static bool own_dir_fresh(struct inode *dir)
 
 	return ttl && test_bit(KS3_I_OWN, &di->flags) &&
 	       time_before(jiffies, di->own_since + (unsigned long)ttl * HZ);
+}
+
+/* This mount changed @dir: drop its listing, renew an own directory's trust. */
+static void dir_changed(struct inode *dir)
+{
+	ks3fs_dir_forget_snap(dir);
+	if (test_bit(KS3_I_OWN, &KS3_I(dir)->flags))
+		KS3_I(dir)->own_since = jiffies;
+	ks3fs_pending_renew(dir);	/* a queued marker waits for the tree */
+}
+
+/*
+ * Directories and symlinks wait in the upload queue for their object only
+ * with lazy_create and an upload delay; otherwise they are stored at once.
+ */
+static bool lazy_entry(void)
+{
+	return READ_ONCE(ks3fs_lazy_create) && READ_ONCE(ks3fs_upload_delay_ms);
+}
+
+/* @inode, just made at @dentry, is to be stored by the upload queue. */
+static void queue_lazy_entry(struct inode *inode, struct dentry *dentry)
+{
+	struct ks3fs_inode *ki = KS3_I(inode);
+
+	clear_bit(KS3_I_REMOTE, &ki->flags);
+	set_bit(KS3_I_LAZY, &ki->flags);
+	set_bit(KS3_I_META_DIRTY, &ki->flags);	/* what the object will carry */
+	ks3fs_pending_add(KS3_SB(inode->i_sb), dget(dentry));
 }
 
 /* @parent may no longer list all it holds (d_lock or a reference held). */
@@ -334,7 +364,7 @@ static void own_dir_forget_parent(struct dentry *dentry)
 }
 
 /*
- * Call @fn (under d_lock: it must not sleep) for every cached file in
+ * Call @fn (under d_lock: it must not sleep) for every cached entry of
  * @parent that lazy_create has not stored yet; listings can't show them.
  * Stops at, and returns, the first nonzero return.
  */
@@ -386,7 +416,7 @@ static int add_unstored_one(struct dentry *dentry, void *arg)
 	struct inode *inode = d_inode(dentry);
 
 	c->err = ks3fs_listing_add(c->l, dentry->d_name.name, dentry->d_name.len,
-				   false, i_size_read(inode),
+				   S_ISDIR(inode->i_mode), i_size_read(inode),
 				   inode_get_mtime_sec(inode));
 	return c->err;
 }
@@ -706,11 +736,12 @@ static int ks3fs_create(struct mnt_idmap *idmap, struct inode *dir,
 	}
 	if (lazy) {
 		clear_bit(KS3_I_REMOTE, &KS3_I(inode)->flags);
+		set_bit(KS3_I_LAZY, &KS3_I(inode)->flags);
 		set_bit(KS3_I_DIRTY, &KS3_I(inode)->flags);	/* even if empty */
 	}
 	set_dentry_time(dentry);
 	d_instantiate(dentry, inode);
-	ks3fs_dir_forget_snap(dir);
+	dir_changed(dir);
 	inode_set_mtime_to_ts(dir, inode_set_ctime_current(dir));
 out:
 	ks3fs_meta_release(&attr.meta);
@@ -797,7 +828,7 @@ static int ks3fs_link(struct dentry *old_dentry, struct inode *dir,
 	ihold(inode);
 	set_dentry_time(dentry);
 	d_instantiate(dentry, inode);
-	ks3fs_dir_forget_snap(dir);
+	dir_changed(dir);
 	inode_set_mtime_to_ts(dir, inode_set_ctime_current(dir));
 	return 0;
 }
@@ -809,6 +840,7 @@ static KS3_MKDIR_RET ks3fs_mkdir(struct mnt_idmap *idmap, struct inode *dir,
 	struct ks3fs_attr attr = { .is_dir = true, .has_marker = true };
 	struct ks3fs_meta *meta;
 	struct inode *inode;
+	bool lazy = lazy_entry();
 	char *key;
 	int err;
 
@@ -816,7 +848,7 @@ static KS3_MKDIR_RET ks3fs_mkdir(struct mnt_idmap *idmap, struct inode *dir,
 	if (IS_ERR(key))
 		return KS3_MKDIR_RETURN(PTR_ERR(key));
 	err = new_meta_acl(dir, S_IFDIR | mode, &attr.meta, &meta);
-	if (!err)
+	if (!err && !lazy)
 		err = ks3fs_s3_put_buf(sbi, key, NULL, 0, meta, NULL);
 	if (!err) {
 		inode = ks3fs_new_inode(dir->i_sb, key, &attr);
@@ -827,7 +859,9 @@ static KS3_MKDIR_RET ks3fs_mkdir(struct mnt_idmap *idmap, struct inode *dir,
 			set_bit(KS3_I_OWN, &KS3_I(inode)->flags);
 			set_dentry_time(dentry);
 			d_instantiate(dentry, inode);
-			ks3fs_dir_forget_snap(dir);
+			if (lazy)
+				queue_lazy_entry(inode, dentry);
+			dir_changed(dir);
 		}
 	}
 	ks3fs_meta_release(&attr.meta);
@@ -846,8 +880,10 @@ static int ks3fs_symlink(struct mnt_idmap *idmap, struct inode *dir,
 	struct ks3fs_sb_info *sbi = KS3_SB(dir->i_sb);
 	struct ks3fs_attr attr = {};
 	size_t len = strlen(target);
+	struct ks3fs_meta *meta;
 	struct inode *inode;
-	char *key;
+	bool lazy = lazy_entry();
+	char *key, *link = NULL;
 	int err;
 
 	if (!sbi->meta)
@@ -857,9 +893,14 @@ static int ks3fs_symlink(struct mnt_idmap *idmap, struct inode *dir,
 	key = ks3fs_child_key(dir, &dentry->d_name, false);
 	if (IS_ERR(key))
 		return PTR_ERR(key);
-	err = ks3fs_s3_put_buf(sbi, key, target, len,
-			       new_meta(dir, S_IFLNK | 0777, &attr.meta),
-			       attr.etag);
+	meta = new_meta(dir, S_IFLNK | 0777, &attr.meta);
+	if (lazy) {
+		/* the target lives in memory (->i_link) until it is stored */
+		link = kstrdup(target, GFP_KERNEL);
+		err = link ? 0 : -ENOMEM;
+	} else {
+		err = ks3fs_s3_put_buf(sbi, key, target, len, meta, attr.etag);
+	}
 	if (err)
 		goto out;
 	attr.size = len;
@@ -871,9 +912,15 @@ static int ks3fs_symlink(struct mnt_idmap *idmap, struct inode *dir,
 	}
 	set_dentry_time(dentry);
 	d_instantiate(dentry, inode);
-	ks3fs_dir_forget_snap(dir);
+	if (lazy) {
+		inode->i_link = link;
+		link = NULL;
+		queue_lazy_entry(inode, dentry);
+	}
+	dir_changed(dir);
 	inode_set_mtime_to_ts(dir, inode_set_ctime_current(dir));
 out:
+	kfree(link);
 	kfree(key);
 	return err;
 }
@@ -894,7 +941,7 @@ static int ks3fs_unlink(struct inode *dir, struct dentry *dentry)
 	if (err)
 		return err;
 	clear_nlink(inode);	/* also stops any pending upload */
-	ks3fs_dir_forget_snap(dir);
+	dir_changed(dir);
 	inode_set_mtime_to_ts(dir, inode_set_ctime_current(dir));
 	return 0;
 }
@@ -911,13 +958,15 @@ static int ks3fs_rmdir(struct inode *dir, struct dentry *dentry)
 	err = has_unstored(dentry) ? 0 : ks3fs_s3_dir_is_empty(sbi, key);
 	if (err == 0)
 		err = -ENOTEMPTY;
-	else if (err > 0)
+	else if (err > 0 && !ks3fs_unstored(inode))	/* else no marker */
 		err = ks3fs_s3_delete(sbi, key);
+	else if (err > 0)
+		err = 0;
 	kfree(key);
 	if (err)
 		return err;
 	clear_nlink(inode);
-	ks3fs_dir_forget_snap(dir);
+	dir_changed(dir);
 	inode_set_mtime_to_ts(dir, inode_set_ctime_current(dir));
 	return 0;
 }
@@ -1120,8 +1169,8 @@ static int rename_dir(struct inode *old_dir, struct dentry *old_dentry,
 	}
 
 	ks3fs_rekey_subtree(inode->i_sb, dm->src, dm->dst);
-	ks3fs_dir_forget_snap(old_dir);
-	ks3fs_dir_forget_snap(new_dir);
+	dir_changed(old_dir);
+	dir_changed(new_dir);
 	if (target)
 		clear_nlink(target);
 	inode_set_mtime_to_ts(old_dir, inode_set_ctime_current(old_dir));
@@ -1166,7 +1215,8 @@ static int ks3fs_rename(struct mnt_idmap *idmap, struct inode *old_dir,
 		goto moved;
 	}
 
-	err = ks3fs_upload_locked(inode);
+	err = S_ISREG(inode->i_mode) ? ks3fs_upload_locked(inode) :
+	      ks3fs_push_meta(inode);	/* a lazily made symlink: store it */
 	if (!err && target)	/* ...and the target's: it is about to go */
 		err = ks3fs_orphan(target);
 	if (err)
@@ -1200,8 +1250,8 @@ moved:
 	ks3fs_rehash_ino(inode);
 	if (target)
 		clear_nlink(target);
-	ks3fs_dir_forget_snap(old_dir);
-	ks3fs_dir_forget_snap(new_dir);
+	dir_changed(old_dir);
+	dir_changed(new_dir);
 	inode_set_ctime_current(inode);
 	inode_set_mtime_to_ts(old_dir, inode_set_ctime_current(old_dir));
 	if (new_dir != old_dir)
@@ -1264,6 +1314,7 @@ static int ks3fs_d_revalidate(KS3_REVALIDATE_ARGS)
 
 	ki = KS3_I(inode);
 	if (IS_ROOT(dentry) || test_bit(KS3_I_DIRTY, &ki->flags) ||
+	    ks3fs_unstored(inode) ||
 	    attrs_fresh(sbi, ki->attr_time))
 		return 1;
 	if (flags & LOOKUP_RCU)

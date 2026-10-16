@@ -960,14 +960,13 @@ int ks3fs_upload(struct inode *inode)
 	return err;
 }
 
-/* A file made with lazy_create whose object does not exist yet. */
+/* A file, directory or symlink made with lazy_create, not stored yet. */
 bool ks3fs_unstored(struct inode *inode)
 {
 	struct ks3fs_inode *ki = KS3_I(inode);
 
-	return S_ISREG(inode->i_mode) && inode->i_nlink &&
-	       !test_bit(KS3_I_REMOTE, &ki->flags) &&
-	       !test_bit(KS3_I_TMPFILE, &ki->flags);
+	return inode->i_nlink && test_bit(KS3_I_LAZY, &ki->flags) &&
+	       !test_bit(KS3_I_REMOTE, &ki->flags);
 }
 
 /* ---------- delayed upload of closed files ---------- */
@@ -975,9 +974,12 @@ bool ks3fs_unstored(struct inode *inode)
 /*
  * The last close of a written file queues its upload for upload_delay_ms,
  * so that a chmod or utimes right after it (cp -p, tar, Nix) travels with
- * the data instead of costing a CopyObject of its own.  The queue holds a
- * reference to the file's dentry: that keeps the name in the dcache, the
- * only record of a lazily created file until its upload.  Due uploads go
+ * the data instead of costing a CopyObject of its own.  Lazily created
+ * directories and symlinks wait the same way for their marker or link
+ * object, which then carries their final mode and times.  A change to a
+ * queued entry (or, for a directory, to what it holds) restarts its wait.
+ * The queue holds a reference to the dentry: that keeps the name in the
+ * dcache, the only record of a lazily created entry until it is stored.  Due uploads go
  * out in batches, up to parallel= at a time; sync(2), syncfs(2) and
  * unmount send everything queued at once.
  */
@@ -990,8 +992,8 @@ struct upload_batch {
 	struct dentry *d[UPLOAD_BATCH];
 };
 
-/* Queue @dentry's file (consuming the caller's reference to @dentry). */
-static void pending_add(struct ks3fs_sb_info *sbi, struct dentry *dentry)
+/* Queue @dentry's inode (consuming the caller's reference to @dentry). */
+void ks3fs_pending_add(struct ks3fs_sb_info *sbi, struct dentry *dentry)
 {
 	struct ks3fs_inode *ki = KS3_I(d_inode(dentry));
 	struct dentry *extra = NULL;
@@ -1009,6 +1011,26 @@ static void pending_add(struct ks3fs_sb_info *sbi, struct dentry *dentry)
 			   ks3fs_ms_param(&ks3fs_upload_delay_ms));
 }
 
+/* @inode changed: if it is queued, its wait starts again. */
+void ks3fs_pending_renew(struct inode *inode)
+{
+	struct ks3fs_sb_info *sbi = KS3_SB(inode->i_sb);
+	struct ks3fs_inode *ki = KS3_I(inode);
+
+	spin_lock(&sbi->pending_lock);
+	if (!list_empty(&ki->pending)) {
+		ki->pending_since = jiffies;
+		list_move_tail(&ki->pending, &sbi->pending);
+	}
+	spin_unlock(&sbi->pending_lock);
+}
+
+/* Queued (unlocked peek: periodic metadata writeback leaves it be). */
+bool ks3fs_pending(struct inode *inode)
+{
+	return !list_empty_careful(&KS3_I(inode)->pending);
+}
+
 static int upload_one(void *ctx, int i)
 {
 	struct upload_batch *b = ctx;
@@ -1016,6 +1038,15 @@ static int upload_one(void *ctx, int i)
 	int err;
 
 	b->done[i] = true;
+	if (!S_ISREG(inode->i_mode)) {	/* a directory marker or symlink */
+		err = ks3fs_push_meta(inode);
+		if (err) {
+			pr_warn_ratelimited("ks3fs: storing '%s' failed: %d\n",
+					    KS3_I(inode)->key, err);
+			ks3fs_schedule_meta_writeback(inode);	/* try again later */
+		}
+		return 0;
+	}
 	if (inode_is_open_for_write(inode))
 		return 0;	/* written again: its last close queues it anew */
 	err = ks3fs_upload(inode);
@@ -1036,9 +1067,12 @@ static void upload_batch_release(void *ctx)
 	int i;
 
 	for (i = 0; i < b->nr; i++) {
+		struct ks3fs_inode *ki = KS3_I(d_inode(b->d[i]));
+
 		/* a sync that was killed: what it didn't reach stays queued */
-		if (!b->done[i] && test_bit(KS3_I_DIRTY, &KS3_I(d_inode(b->d[i]))->flags))
-			pending_add(b->sbi, b->d[i]);
+		if (!b->done[i] && (test_bit(KS3_I_DIRTY, &ki->flags) ||
+				    test_bit(KS3_I_META_DIRTY, &ki->flags)))
+			ks3fs_pending_add(b->sbi, b->d[i]);
 		else
 			dput(b->d[i]);
 	}
@@ -1230,7 +1264,7 @@ static int ks3fs_release(struct inode *inode, struct file *file)
 		return 0;
 	if (READ_ONCE(ks3fs_upload_delay_ms) && inode->i_nlink &&
 	    test_bit(KS3_I_DIRTY, &KS3_I(inode)->flags)) {
-		pending_add(KS3_SB(inode->i_sb), dget(file->f_path.dentry));
+		ks3fs_pending_add(KS3_SB(inode->i_sb), dget(file->f_path.dentry));
 		return 0;
 	}
 	err = ks3fs_upload(inode);

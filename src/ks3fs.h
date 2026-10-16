@@ -141,6 +141,7 @@ enum {
 	KS3_I_XATTR_KNOWN,	/* @xattr reflects the object's headers */
 	KS3_I_TMPFILE,		/* O_TMPFILE not linked yet: no object */
 	KS3_I_OWN,		/* dir: made by this mount, every entry cached */
+	KS3_I_LAZY,		/* made by lazy_create: no object until stored */
 };
 
 struct ks3fs_inode {
@@ -156,7 +157,7 @@ struct ks3fs_inode {
 	atomic_t opens;		/* open files (silly rename on unlink) */
 	struct ks3fs_snap *snap; /* dirs: recent listing, under @lock */
 	char *xattr;		/* x-amz-meta-xattr value or NULL, under @lock */
-	unsigned long own_since; /* dirs: when KS3_I_OWN was set */
+	unsigned long own_since; /* dirs: KS3_I_OWN set or last renewed */
 	/* on sbi->pending (under its lock): closed, upload not sent yet */
 	struct list_head pending;
 	unsigned long pending_since;
@@ -450,6 +451,9 @@ char *ks3fs_child_key(struct inode *dir, const struct qstr *name, bool is_dir);
 int ks3fs_upload(struct inode *inode);
 void ks3fs_upload_work(struct work_struct *work);
 void ks3fs_upload_pending(struct ks3fs_sb_info *sbi);
+void ks3fs_pending_add(struct ks3fs_sb_info *sbi, struct dentry *dentry);
+void ks3fs_pending_renew(struct inode *inode);
+bool ks3fs_pending(struct inode *inode);
 bool ks3fs_unstored(struct inode *inode);
 int ks3fs_upload_locked(struct inode *inode);
 int ks3fs_orphan(struct inode *inode);

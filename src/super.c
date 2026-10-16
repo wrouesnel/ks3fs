@@ -31,7 +31,7 @@ static struct kmem_cache *ks3fs_inode_cachep;
 
 unsigned int ks3fs_own_dir_ttl = 60;
 module_param_named(own_dir_ttl, ks3fs_own_dir_ttl, uint, 0644);
-MODULE_PARM_DESC(own_dir_ttl, "seconds a directory this mount created answers lookups of names it lacks without asking the store (0: off)");
+MODULE_PARM_DESC(own_dir_ttl, "seconds after this mount last changed a directory it created that the directory answers lookups of names it lacks without asking the store (0: off)");
 
 bool ks3fs_lazy_create = true;
 module_param_named(lazy_create, ks3fs_lazy_create, bool, 0644);
@@ -81,6 +81,8 @@ static void ks3fs_free_inode(struct inode *inode)
 
 	kfree(ki->key);
 	kfree(ki->xattr);
+	if (S_ISLNK(inode->i_mode))
+		kfree(inode->i_link);	/* a lazily created link's target */
 	kmem_cache_free(ks3fs_inode_cachep, ki);
 }
 
@@ -303,6 +305,10 @@ int ks3fs_push_meta(struct inode *inode)
 	}
 	if (S_ISDIR(inode->i_mode) && !test_bit(KS3_I_REMOTE, &ki->flags))
 		err = ks3fs_s3_put_buf(sbi, key, NULL, 0, &m, NULL);
+	else if (S_ISLNK(inode->i_mode) && !test_bit(KS3_I_REMOTE, &ki->flags))
+		err = ks3fs_s3_put_buf(sbi, key, inode->i_link,
+				       inode->i_link ? strlen(inode->i_link) : 0,
+				       &m, etag);
 	else if (i_size_read(inode) > KS3FS_MAX_PUT)	/* too big for CopyObject */
 		err = ks3fs_s3_copy_large(sbi, key, key, i_size_read(inode),
 					  &m, etag);
@@ -338,6 +344,7 @@ static void ks3fs_meta_work(struct work_struct *work)
 
 void ks3fs_schedule_meta_writeback(struct inode *inode)
 {
+	ks3fs_pending_renew(inode);	/* queued: stored with it, later */
 	mark_inode_dirty(inode);
 	queue_delayed_work(system_unbound_wq, &KS3_SB(inode->i_sb)->meta_work,
 			   ks3fs_ms_param(&ks3fs_meta_delay_ms));
@@ -345,7 +352,12 @@ void ks3fs_schedule_meta_writeback(struct inode *inode)
 
 static int ks3fs_write_inode(struct inode *inode, struct writeback_control *wbc)
 {
-	int err = ks3fs_push_meta(inode);
+	int err;
+
+	/* the upload queue stores it (sync and unmount go through it too) */
+	if (wbc->sync_mode != WB_SYNC_ALL && ks3fs_pending(inode))
+		return 0;
+	err = ks3fs_push_meta(inode);
 
 	if (err) {
 		pr_warn_ratelimited("ks3fs: storing metadata of '%s' failed: %d\n",

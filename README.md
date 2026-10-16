@@ -53,6 +53,12 @@ No maintained in-kernel S3 filesystem was found.
     creating and writing a file costs one PUT, not an empty PUT followed by
     the data. Until then it exists only on this mount. `readdir` and `rmdir`
     count it, and renaming or unlinking it costs no request.
+  - Directories and symlinks made with `lazy_create` (and an upload delay)
+    wait in the same queue for their marker or link object. That object
+    then carries their final mode, owner and times, so `cp -a`, `tar` and
+    Nix's canonicalisation don't cost a CopyObject per directory and
+    symlink. A directory's wait restarts with every change to what it
+    holds; other clients see it as soon as any entry below is stored.
   - The last close of a written file queues its upload for `upload_delay_ms`
     (default 5 s). A chmod, chown, utimes or xattr change made in that time
     goes out with the data instead of as a CopyObject afterwards. `cp -p`,
@@ -105,8 +111,9 @@ No maintained in-kernel S3 filesystem was found.
   doesn't find costs a HEAD and a LIST (to rule out an implicit directory).
   A directory created by `mkdir` on this mount holds only what this mount put
   there, and all of that is in the dcache. So for `own_dir_ttl` seconds
-  (default 60) after the `mkdir`, a name missing from it is taken to be absent
-  without a request. Writing a tree of new files then costs no lookups. Once
+  (default 60) after this mount last changed it (the `mkdir`, or an entry
+  made, removed or renamed in it), a name missing from it is taken to be
+  absent without a request. Writing a tree of new files then costs no lookups. Once
   any entry of the directory is dropped from the dcache (memory pressure), or
   turns out to be gone or replaced on the server, lookups ask the store again. With `nometa`, `readdir`
   instantiates dentries from the listing, the way NFS READDIRPLUS does, so
@@ -192,8 +199,8 @@ Module parameters apply to every mount and can be changed at any time, in
 
 | parameter | default | meaning |
 |---|---|---|
-| `own_dir_ttl` | 60 | seconds a directory this mount created answers lookups of names it lacks without a request (0 = off) |
-| `lazy_create` | Y | create a file's object with its first upload rather than with an empty PUT at `open` |
+| `own_dir_ttl` | 60 | seconds after this mount last changed a directory it created that the directory answers lookups of names it lacks without a request (0 = off) |
+| `lazy_create` | Y | create a file's object with its first upload rather than with an empty PUT at `open`; with `upload_delay_ms`, store new directories and symlinks from the upload queue too |
 | `upload_delay_ms` | 5000 | how long after the last close a file's data is uploaded (0 = on close) |
 | `meta_delay_ms` | 5000 | how long before chmod/chown/utimes/xattr changes are written back |
 | `readdir_window_ms` | 10000 | how long a listing is kept to prefetch its entries' attributes |
@@ -234,8 +241,12 @@ and permission errors appear there, set `lazy_create=N`.
   before the upload is overwritten by it, and missing write permission
   shows up at the upload rather than at `open`.
 - `own_dir_ttl` assumes other clients don't add entries to a directory this
-  mount just created. If one does, this mount won't see the new entry until
-  `own_dir_ttl` runs out (or the entries are evicted).
+  mount created and is still changing. If one does, this mount won't see the
+  new entry until `own_dir_ttl` after its own last change (or until the
+  entries are evicted).
+- With `lazy_create`, an empty directory reaches the store `upload_delay_ms`
+  after the last change inside it (or at `sync`), so other clients and a
+  crash may not see it before then.
 - `O_DIRECT` is not supported.
 - `fallocate` reserves nothing (objects have no allocation): it extends the
   size, and punching or zeroing a range writes zeros. Collapsing and
@@ -314,7 +325,10 @@ file.
    - `deferred` checks the request-saving defaults by counting requests in
      `/proc/self/mountstats`:
      - creating 20 files in a new directory, then chmod-ing and touching them,
-       costs 20 PUTs and nothing else;
+       costs 21 PUTs (one is the directory) and nothing else;
+     - new directories and symlinks are stored once, with their final
+       mode, owner and times;
+     - `own_dir_ttl` counts from the last change to the directory;
      - unstored files are listed, stat-ed and counted by `rmdir`, and renaming
        or unlinking them is free;
      - `sync`, `fsync` and unmount send queued uploads;
